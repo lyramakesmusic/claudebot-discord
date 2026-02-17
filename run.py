@@ -40,11 +40,14 @@ SELFBOT_SCRIPT = WATCH_DIR / "selfbot" / "self.py"
 CODEX_BOT_SCRIPT = WATCH_DIR / "codex_bot.py"
 
 
+VENV_PYTHON = str(WATCH_DIR / ".venv" / "Scripts" / "python.exe") if os.name == "nt" else str(WATCH_DIR / ".venv" / "bin" / "python")
+
+
 def run_bot() -> subprocess.Popen:
-    # Use uv run so bot.py gets the venv with voice/CUDA deps.
-    # Selfbot stays on sys.executable (needs its own modified discord.py).
+    # Use venv python directly — uv run's trampoline on Windows spawns
+    # a parent+child python pair that both run the script, causing double logins.
     return subprocess.Popen(
-        ["uv", "run", "python", str(WATCH_DIR / "bot.py")],
+        [VENV_PYTHON, str(WATCH_DIR / "bot.py")],
         cwd=str(WATCH_DIR),
         creationflags=CREATE_FLAGS,
     )
@@ -64,7 +67,7 @@ def run_codex_bot() -> subprocess.Popen | None:
     if not CODEX_BOT_SCRIPT.exists():
         return None
     return subprocess.Popen(
-        ["uv", "run", "python", str(CODEX_BOT_SCRIPT)],
+        [VENV_PYTHON, str(CODEX_BOT_SCRIPT)],
         cwd=str(WATCH_DIR),
         creationflags=CREATE_FLAGS,
     )

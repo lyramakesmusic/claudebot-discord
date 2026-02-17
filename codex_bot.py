@@ -196,6 +196,7 @@ class _TurnState:
         self._seen_tool_ids: set[str] = set()
         self.done = asyncio.Event()
         self.error: str | None = None
+        self.turn_id: str | None = None
         self.on_text = None
         self.on_tool = None
 
@@ -212,9 +213,9 @@ class CodexAppServer:
         self._alive = False
         self._req_id = 0
         self._pending: dict[int | str, asyncio.Future] = {}  # id -> future for responses
-        self._conversations: dict[str, str] = {}  # ctx_key -> conversationId
-        self._conv_models: dict[str, str] = {}  # conversationId -> model
-        self._turns: dict[str, _TurnState] = {}  # conversationId -> active turn
+        self._threads: dict[str, str] = {}  # ctx_key -> threadId
+        self._thread_models: dict[str, str] = {}  # threadId -> model
+        self._turns: dict[str, _TurnState] = {}  # threadId -> active turn
         self._send_locks: dict[str, asyncio.Lock] = {}  # ctx_key -> lock
         self._reader_task: asyncio.Task | None = None
         self._write_lock = asyncio.Lock()
@@ -222,6 +223,13 @@ class CodexAppServer:
     def _next_id(self) -> int:
         self._req_id += 1
         return self._req_id
+
+    @staticmethod
+    def _is_stale_conversation_error(err: Exception) -> bool:
+        msg = str(err).lower()
+        needles = ("conversation not found", "invalid conversation", "unknown conversation",
+                   "thread not found", "invalid thread", "unknown thread")
+        return any(n in msg for n in needles)
 
     async def start(self):
         """Spawn the codex app-server process."""
@@ -338,6 +346,11 @@ class CodexAppServer:
                 if not fut.done():
                     fut.set_exception(RuntimeError("App-server disconnected"))
             self._pending.clear()
+            # Thread handles belong to the current app-server process.
+            # Force resume/new thread on next turn after any disconnect.
+            self._threads.clear()
+            self._thread_models.clear()
+            self._turns.clear()
             log.warning("App-server read loop exited")
 
     async def _handle_server_request(self, msg: dict):
@@ -385,27 +398,18 @@ class CodexAppServer:
         await self._respond(req_id, {})
 
     async def _handle_notification(self, method: str, params: dict):
-        """Handle streaming notifications from the server.
+        """Handle streaming notifications from the v2 app-server.
 
-        Events come in two parallel naming conventions:
-        - Short form: item/agentMessage/delta, item/started, turn/completed
-        - Prefixed:   codex/event/agent_message_delta, codex/event/item_started
-        Both carry the same data but in slightly different shapes.
-        We handle both to be safe.
+        v2 notification method names: item/agentMessage/delta, item/started,
+        item/completed, turn/completed, error.
+        All routed by params["threadId"].
         """
-        # Extract conversationId/threadId from params
-        conv_id = params.get("conversationId") or params.get("threadId", "")
-        turn = self._turns.get(conv_id) if conv_id else None
+        thread_id = params.get("threadId", "")
+        turn = self._turns.get(thread_id) if thread_id else None
 
-        # ── Text deltas ──────────────────────────────────────────
-        # Use content_delta (most reliable) + short-form fallback.
-        # Skip agent_message_delta to avoid double-counting.
-        if method in ("item/agentMessage/delta",
-                      "codex/event/agent_message_content_delta"):
-            if "msg" in params:
-                delta = params["msg"].get("delta", "")
-            else:
-                delta = params.get("delta", "")
+        # -- Text deltas --
+        if method == "item/agentMessage/delta":
+            delta = params.get("delta", "")
             if turn and delta:
                 turn.text += delta
                 if turn.on_text:
@@ -414,50 +418,54 @@ class CodexAppServer:
                     except Exception:
                         log.exception("on_text callback error")
 
-        # ── Tool/command started ─────────────────────────────────
-        elif method in ("item/started", "codex/event/item_started"):
-            if "msg" in params:
-                item = params["msg"].get("item", {})
-            else:
-                item = params.get("item", {})
+        # -- Tool/command started --
+        elif method == "item/started":
+            item = params.get("item", {})
             item_type = item.get("type", "").lower()
             item_id = item.get("id", "")
-            if turn and item_type in ("commandexecution", "command_execution", "shell"):
-                if item_id and item_id not in turn._seen_tool_ids:
-                    turn._seen_tool_ids.add(item_id)
+            _SKIP_TYPES = ("", "message", "text", "usermessage", "agentmessage", "reasoning")
+            if turn and item_id and item_id not in turn._seen_tool_ids and item_type not in _SKIP_TYPES:
+                turn._seen_tool_ids.add(item_id)
+                if item_type in ("commandexecution", "command_execution", "shell"):
                     cmd_str = item.get("command", "") or item.get("call", {}).get("name", "command")
                     desc = f"Shell(`{str(cmd_str)[:80]}`)"
-                    turn.tools.append(desc)
-                    if turn.on_tool:
-                        try:
-                            await turn.on_tool(desc)
-                        except Exception:
-                            log.exception("on_tool callback error")
+                else:
+                    call = item.get("call", {})
+                    name = call.get("name", "") or item.get("name", "") or item_type
+                    desc = f"{name}()" if name else f"tool:{item_type}"
+                turn.tools.append(desc)
+                if turn.on_tool:
+                    try:
+                        await turn.on_tool(desc)
+                    except Exception:
+                        log.exception("on_tool callback error")
 
-        # ── Tool/command completed ───────────────────────────────
-        elif method in ("item/completed", "codex/event/item_completed"):
-            if "msg" in params:
-                item = params["msg"].get("item", {})
-            else:
-                item = params.get("item", {})
+        # -- Tool/command completed --
+        elif method == "item/completed":
+            item = params.get("item", {})
             item_type = item.get("type", "").lower()
             item_id = item.get("id", "")
-            if turn and item_type in ("commandexecution", "command_execution", "shell"):
-                if item_id and item_id not in turn._seen_tool_ids:
-                    turn._seen_tool_ids.add(item_id)
+            _SKIP_TYPES = ("", "message", "text", "usermessage", "agentmessage", "reasoning")
+            if turn and item_id and item_id not in turn._seen_tool_ids and item_type not in _SKIP_TYPES:
+                turn._seen_tool_ids.add(item_id)
+                if item_type in ("commandexecution", "command_execution", "shell"):
                     cmd_str = item.get("command", "") or item.get("call", {}).get("name", "command")
                     desc = f"Shell(`{str(cmd_str)[:80]}`)"
-                    turn.tools.append(desc)
-                    if turn.on_tool:
-                        try:
-                            await turn.on_tool(desc)
-                        except Exception:
-                            log.exception("on_tool callback error")
+                else:
+                    call = item.get("call", {})
+                    name = call.get("name", "") or item.get("name", "") or item_type
+                    desc = f"{name}()" if name else f"tool:{item_type}"
+                turn.tools.append(desc)
+                if turn.on_tool:
+                    try:
+                        await turn.on_tool(desc)
+                    except Exception:
+                        log.exception("on_tool callback error")
 
-        # ── Turn completed ───────────────────────────────────────
-        elif method in ("turn/completed", "codex/event/task_complete"):
+        # -- Turn completed --
+        elif method == "turn/completed":
             if turn:
-                err = params.get("error") or (params.get("turn", {}) or {}).get("error")
+                err = (params.get("turn", {}) or {}).get("error")
                 if err:
                     if isinstance(err, dict):
                         turn.error = err.get("message", str(err))
@@ -465,56 +473,73 @@ class CodexAppServer:
                         turn.error = str(err)
                 turn.done.set()
 
-        # ── Error ────────────────────────────────────────────────
+        # -- Error --
         elif method == "error":
             log.warning(f"App-server error: {json.dumps(params)[:500]}")
-            if conv_id and turn:
-                turn.error = params.get("message", "Server error")
-                turn.done.set()
+            if thread_id and turn:
+                err = params.get("error", {})
+                msg = err.get("message", str(err)) if isinstance(err, dict) else params.get("message", "Server error")
+                will_retry = params.get("willRetry", False)
+                if not will_retry:
+                    turn.error = msg
+                    turn.done.set()
+                else:
+                    log.info(f"Server will retry after error: {msg}")
 
-        # ── Everything else: silently ignored ────────────────────
+        # -- Everything else: silently ignored --
 
-    async def new_conversation(self, ctx_key: str, cwd: str,
-                               system_prompt: str = "") -> str:
-        """Create a new conversation, subscribe to events, return conversationId."""
+    async def new_thread(self, ctx_key: str, cwd: str,
+                         system_prompt: str = "") -> str:
+        """Create a new v2 thread, return threadId."""
         params = {
             "cwd": cwd.replace("\\", "/"),
+            "sandbox": "danger-full-access",
+            "approvalPolicy": "never",
         }
         if system_prompt:
             params["developerInstructions"] = system_prompt
         if CODEX_MODEL:
             params["model"] = CODEX_MODEL
-        # danger-full-access sandbox
-        params["sandbox"] = "danger-full-access"
 
-        resp = await self._request("newConversation", params)
-        conv_id = resp.get("conversationId", "")
-        if not conv_id:
-            raise RuntimeError(f"No conversationId returned: {resp}")
+        resp = await self._request("thread/start", params)
+        thread_id = (resp.get("thread", {}) or {}).get("id", "")
+        if not thread_id:
+            raise RuntimeError(f"No thread.id returned: {resp}")
         model = resp.get("model", "")
-        log.info(f"newConversation response: {json.dumps(resp)[:300]}")
+        log.info(f"thread/start response: {json.dumps(resp)[:300]}")
 
-        # Subscribe to streaming events for this conversation
-        await self._request("addConversationListener", {"conversationId": conv_id})
-
-        self._conversations[ctx_key] = conv_id
+        # v2 auto-subscribes, no addConversationListener needed
+        self._threads[ctx_key] = thread_id
         if model:
-            self._conv_models[conv_id] = model
-        log.info(f"New conversation {conv_id[:12]}... for {ctx_key} (model={model})")
-        return conv_id
+            self._thread_models[thread_id] = model
+        log.info(f"New thread {thread_id[:12]}... for {ctx_key} (model={model})")
+        return thread_id
 
-    async def resume_conversation(self, ctx_key: str, conv_id: str) -> str:
-        """Resume a previous conversation by ID."""
+    async def resume_thread(self, ctx_key: str, thread_id: str,
+                            cwd: str = "", system_prompt: str = "") -> str:
+        """Resume a previous thread by ID (v2 loads from disk)."""
         try:
-            resp = await self._request("resumeConversation", {"conversationId": conv_id})
-            resumed_id = resp.get("conversationId", conv_id)
-            # Subscribe to events
-            await self._request("addConversationListener", {"conversationId": resumed_id})
-            self._conversations[ctx_key] = resumed_id
-            log.info(f"Resumed conversation {resumed_id[:12]}... for {ctx_key}")
+            params = {"threadId": thread_id}
+            if cwd:
+                params["cwd"] = cwd.replace("\\", "/")
+            if system_prompt:
+                params["developerInstructions"] = system_prompt
+            if CODEX_MODEL:
+                params["model"] = CODEX_MODEL
+            params["sandbox"] = "danger-full-access"
+            params["approvalPolicy"] = "never"
+
+            resp = await self._request("thread/resume", params)
+            resumed_id = (resp.get("thread", {}) or {}).get("id", thread_id)
+            model = resp.get("model", "")
+            # v2 auto-subscribes
+            self._threads[ctx_key] = resumed_id
+            if model:
+                self._thread_models[resumed_id] = model
+            log.info(f"Resumed thread {resumed_id[:12]}... for {ctx_key}")
             return resumed_id
         except Exception as e:
-            log.warning(f"Failed to resume conversation {conv_id[:12]}...: {e}")
+            log.warning(f"Failed to resume thread {thread_id[:12]}...: {e}")
             raise
 
     async def send_turn(self, ctx_key: str, cwd: str, prompt: str,
@@ -523,7 +548,7 @@ class CodexAppServer:
                         timeout: float = 300) -> dict:
         """Send a user message and wait for the turn to complete.
 
-        Creates conversation if needed. Resumes from state if available.
+        Creates thread if needed. Resumes from state if available.
         Returns dict with text, tools, error info.
         """
         # Ensure we have a lock for this context
@@ -535,79 +560,110 @@ class CodexAppServer:
             if not self._alive:
                 await self.start()
 
-            # Get or create conversation
-            conv_id = self._conversations.get(ctx_key)
-            if not conv_id:
+            # Get or create thread
+            thread_id = self._threads.get(ctx_key)
+            if not thread_id:
                 # Try resume from saved state
                 saved = state.get_session(ctx_key)
                 if saved:
                     try:
-                        conv_id = await self.resume_conversation(
-                            ctx_key, saved["session_id"])
+                        thread_id = await self.resume_thread(
+                            ctx_key, saved["session_id"],
+                            cwd=cwd, system_prompt=system_prompt)
                     except Exception:
-                        conv_id = None
+                        thread_id = None
 
-                if not conv_id:
-                    conv_id = await self.new_conversation(
+                if not thread_id:
+                    thread_id = await self.new_thread(
                         ctx_key, cwd, system_prompt)
 
-            # Create turn state
-            turn = _TurnState()
-            turn.on_text = on_text
-            turn.on_tool = on_tool
-            self._turns[conv_id] = turn
+            for attempt in range(2):
+                # Create turn state
+                turn = _TurnState()
+                turn.on_text = on_text
+                turn.on_tool = on_tool
+                self._turns[thread_id] = turn
 
-            # Build items
-            items = [{"type": "text", "data": {"text": prompt}}]
+                # Determine model - required field, use stored or default
+                model = CODEX_MODEL or self._thread_models.get(thread_id, "gpt-5.3-codex")
 
-            # Determine model — required field, use stored or default
-            model = CODEX_MODEL or self._conv_models.get(conv_id, "gpt-5.3-codex")
-
-            # Send the turn
-            send_params = {
-                "conversationId": conv_id,
-                "items": items,
-                "model": model,
-                "cwd": cwd.replace("\\", "/"),
-                "approvalPolicy": "never",
-                "sandboxPolicy": {"type": "danger-full-access"},
-                "summary": "auto",
-            }
-
-            try:
-                # sendUserTurn returns immediately, events stream via notifications
-                resp = await self._request("sendUserTurn", send_params, timeout=30)
-                log.info(f"sendUserTurn response: {json.dumps(resp)[:300]}")
-            except Exception as e:
-                log.error(f"sendUserTurn failed: {e}")
-                self._turns.pop(conv_id, None)
-                return {
-                    "text": "", "conversation_id": conv_id, "cost_usd": 0,
-                    "error": True, "error_message": str(e), "tools": [],
+                # Send the turn (v2 API)
+                send_params = {
+                    "threadId": thread_id,
+                    "input": [{"type": "text", "text": prompt}],
+                    "model": model,
+                    "cwd": cwd.replace("\\", "/"),
+                    "approvalPolicy": "never",
+                    "sandboxPolicy": {"type": "dangerFullAccess"},
+                    "summary": "auto",
                 }
 
-            # Wait for turn to complete
-            try:
-                await asyncio.wait_for(turn.done.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
-                turn.error = "Response timed out"
-                # Try to interrupt
                 try:
-                    await self._request("interruptConversation",
-                                        {"conversationId": conv_id}, timeout=5)
-                except Exception:
-                    pass
+                    resp = await self._request("turn/start", send_params, timeout=30)
+                    log.info(f"turn/start response: {json.dumps(resp)[:300]}")
+                    # Save turn ID for interrupt support
+                    turn_obj = resp.get("turn", {}) or {}
+                    turn.turn_id = turn_obj.get("id")
+                except Exception as e:
+                    self._turns.pop(thread_id, None)
+                    if attempt == 0 and self._is_stale_conversation_error(e):
+                        log.warning(
+                            f"Stale thread for {ctx_key} ({thread_id[:12]}...), "
+                            "retrying with new thread"
+                        )
+                        self._threads.pop(ctx_key, None)
+                        self._thread_models.pop(thread_id, None)
+                        state.clear_session(ctx_key)
+                        thread_id = await self.new_thread(ctx_key, cwd, system_prompt)
+                        continue
 
-            self._turns.pop(conv_id, None)
+                    log.error(f"turn/start failed: {e}")
+                    return {
+                        "text": "", "conversation_id": thread_id, "cost_usd": 0,
+                        "error": True, "error_message": str(e), "tools": [],
+                    }
 
-            is_error = turn.error is not None and not turn.text
+                # Wait for turn to complete
+                try:
+                    await asyncio.wait_for(turn.done.wait(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    turn.error = "Response timed out"
+                    try:
+                        interrupt_params = {"threadId": thread_id}
+                        if turn.turn_id:
+                            interrupt_params["turnId"] = turn.turn_id
+                        await self._request("turn/interrupt",
+                                            interrupt_params, timeout=5)
+                    except Exception:
+                        pass
+
+                self._turns.pop(thread_id, None)
+
+                # If the error is a stale/missing thread (e.g. after reload),
+                # clear the session and retry with a fresh thread.
+                if (attempt == 0 and turn.error and not turn.text
+                        and self._is_stale_conversation_error(Exception(turn.error))):
+                    log.warning(f"Stale thread via notification for {ctx_key}, retrying fresh")
+                    self._threads.pop(ctx_key, None)
+                    self._thread_models.pop(thread_id, None)
+                    state.clear_session(ctx_key)
+                    thread_id = await self.new_thread(ctx_key, cwd, system_prompt)
+                    continue
+
+                is_error = turn.error is not None and not turn.text
+                return {
+                    "text": turn.text,
+                    "conversation_id": thread_id,
+                    "cost_usd": 0,
+                    "error": is_error,
+                    "error_message": turn.error or "",
+                    "tools": turn.tools,
+                }
+
+            # Both attempts failed
             return {
-                "text": turn.text,
-                "conversation_id": conv_id,
-                "cost_usd": 0,
-                "error": is_error,
-                "error_message": turn.error or "",
-                "tools": turn.tools,
+                "text": "", "conversation_id": thread_id, "cost_usd": 0,
+                "error": True, "error_message": turn.error or "Failed after retry", "tools": [],
             }
 
     def is_busy(self, ctx_key: str) -> bool:
@@ -616,11 +672,14 @@ class CodexAppServer:
 
     async def interrupt(self, ctx_key: str):
         """Interrupt a running turn."""
-        conv_id = self._conversations.get(ctx_key)
-        if conv_id:
+        thread_id = self._threads.get(ctx_key)
+        if thread_id:
             try:
-                await self._request("interruptConversation",
-                                    {"conversationId": conv_id}, timeout=5)
+                params = {"threadId": thread_id}
+                turn = self._turns.get(thread_id)
+                if turn and turn.turn_id:
+                    params["turnId"] = turn.turn_id
+                await self._request("turn/interrupt", params, timeout=5)
             except Exception as e:
                 log.warning(f"Interrupt failed: {e}")
 
@@ -638,8 +697,8 @@ class CodexAppServer:
                 await self.proc.wait()
             except Exception:
                 pass
-        self._conversations.clear()
-        self._conv_models.clear()
+        self._threads.clear()
+        self._thread_models.clear()
         self._turns.clear()
         self._pending.clear()
         log.info("Codex app-server killed")
@@ -757,12 +816,26 @@ state = BotState(STATE_FILE)
 bridge = CodexAppServer()
 _processed_msgs: set[int] = set()
 _boot_time = datetime.utcnow()
+_injected_inputs: dict[str, list[dict]] = {}
+_injected_lock = asyncio.Lock()
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
 
 client = discord.Client(intents=intents)
+
+
+async def _queue_injected_input(ctx_key: str, prompt: str, attachments: list[str]) -> int:
+    async with _injected_lock:
+        q = _injected_inputs.setdefault(ctx_key, [])
+        q.append({"prompt": prompt, "attachments": attachments})
+        return len(q)
+
+
+async def _pop_injected_inputs(ctx_key: str) -> list[dict]:
+    async with _injected_lock:
+        return _injected_inputs.pop(ctx_key, [])
 
 
 @client.event
@@ -875,29 +948,31 @@ async def on_message(message: discord.Message):
         os._exit(0)
 
     if _cmd == "reload":
-        if _self_modified():
-            log.info("Manual reload requested — validating")
-            try:
-                r = subprocess.run(
-                    [sys.executable, "-c",
-                     f"compile(open(r'{_BOT_FILE}', encoding='utf-8').read(), 'codex_bot.py', 'exec')"],
-                    capture_output=True, text=True, timeout=10,
-                    creationflags=CREATE_FLAGS,
-                )
-                if r.returncode != 0:
-                    err = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "unknown"
-                    await message.reply(f"Reload aborted — bad syntax:\n```\n{err[:500]}\n```", mention_author=False)
-                    return
-            except Exception as e:
-                await message.reply(f"Reload validation failed: {e}", mention_author=False)
+        log.info("Manual reload requested - validating")
+        try:
+            r = subprocess.run(
+                [sys.executable, "-c",
+                 f"compile(open(r'{_BOT_FILE}', encoding='utf-8').read(), 'codex_bot.py', 'exec')"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=CREATE_FLAGS,
+            )
+            if r.returncode != 0:
+                err = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "unknown"
+                await message.reply(f"Reload aborted - bad syntax:\n```\n{err[:500]}\n```", mention_author=False)
                 return
-            await message.add_reaction("\u2705")
-            await bridge.kill()
-            await client.close()
+        except Exception as e:
+            await message.reply(f"Reload validation failed: {e}", mention_author=False)
             return
-        else:
-            await message.reply("No changes to reload.", mention_author=False)
-            return
+        await message.add_reaction("\u2705")
+        await bridge.kill()
+        await client.close()
+        return
+
+    # Snapshot mtime so we only warn if codex modifies the file *during this turn*
+    try:
+        _turn_start_mtime = _BOT_FILE.stat().st_mtime
+    except Exception:
+        _turn_start_mtime = 0
 
     # ── Check app-server health ──────────────────────────────
     if not bridge._alive:
@@ -970,9 +1045,13 @@ async def on_message(message: discord.Message):
     else:
         sys_prompt = _build_thread_context()
 
-    # ── If busy, tell user ───────────────────────────────────
+    cleanup_paths = [p for _, p in att_paths]
+
+    # ── If busy, queue + inject ──────────────────────────────
     if bridge.is_busy(ctx_key):
-        await message.reply("I'm still working on the previous request. Please wait.", mention_author=False)
+        await _queue_injected_input(ctx_key, user_msg, cleanup_paths)
+        await bridge.interrupt(ctx_key)
+        await message.reply("Queued. I will inject this into the active run.", mention_author=False)
         return
 
     # ── Run turn ─────────────────────────────────────────────
@@ -1020,79 +1099,91 @@ async def on_message(message: discord.Message):
         except Exception as e:
             log.warning(f"Failed to send tool status: {e}")
 
-    try:
-        result = await bridge.send_turn(
-            ctx_key, cwd, user_msg,
-            system_prompt=sys_prompt,
-            on_text=on_text, on_tool=on_tool,
-        )
-    except Exception as e:
-        log.exception("Codex bridge error")
-        typing_task.cancel()
-        await message.reply(f"Error: {e}", mention_author=False)
-        return
-
-    # Persist conversation_id for resume across restarts
-    conv_id = result.get("conversation_id")
-    if conv_id:
-        state.set_session(ctx_key, conv_id, cwd, label)
-
-    log.info(f"turn finished: error={result['error']} text_len={len(result.get('text',''))} "
-             f"tools={len(result.get('tools',[]))} current_text_len={len(current_text)} "
-             f"sent_text_len={sent_text_len}")
-
+    next_prompt = user_msg
     pending_reload = False
     try:
-        if result["error"]:
-            err = result.get("error_message") or "Unknown error"
-            await message.reply(f"Error:\n```\n{err[:1800]}\n```", mention_author=False)
-            return
-
-        text = current_text or result.get("text", "")
-        if not text and sent_text_len == 0:
-            await message.reply("*(empty response)*", mention_author=False)
-            return
-        if not text:
-            return
-
-        cleaned_text, actions = extract_bot_actions(text)
-
-        if sent_text_len > 0:
-            unsent_raw = current_text[sent_text_len:] if sent_text_len < len(current_text) else ""
-            final_cleaned, _ = extract_bot_actions(unsent_raw)
-            final_text = final_cleaned.strip()
-        else:
-            final_text = cleaned_text
-
-        if final_text:
-            text_chunks = split_message(sanitize(final_text))
+        while next_prompt:
+            current_text = ""
+            sent_text_len = 0
+            tool_log = []
             try:
-                await message.reply(text_chunks[0], mention_author=False)
+                result = await bridge.send_turn(
+                    ctx_key, cwd, next_prompt,
+                    system_prompt=sys_prompt,
+                    on_text=on_text, on_tool=on_tool,
+                )
             except Exception as e:
-                log.warning(f"Failed to reply: {e}")
-                try:
-                    await channel.send(text_chunks[0])
-                except Exception as e2:
-                    log.warning(f"Fallback send also failed: {e2}")
-            for chunk in text_chunks[1:]:
-                try:
-                    await channel.send(chunk)
-                except Exception as e:
-                    log.warning(f"Failed to send chunk: {e}")
+                log.exception("Codex bridge error")
+                await message.reply(f"Error: {e}", mention_author=False)
+                return
 
-        if actions:
-            action_results, pending_reload = await execute_bot_actions(actions, message, channel, guild_id)
-            if action_results:
-                remaining = sanitize("\n".join(action_results))
-                for chunk in split_message(remaining):
+            # Persist conversation_id for resume across restarts
+            conv_id = result.get("conversation_id")
+            if conv_id:
+                state.set_session(ctx_key, conv_id, cwd, label)
+
+            log.info(f"turn finished: error={result['error']} text_len={len(result.get('text',''))} "
+                     f"tools={len(result.get('tools',[]))} current_text_len={len(current_text)} "
+                     f"sent_text_len={sent_text_len}")
+
+            if result["error"]:
+                err = result.get("error_message") or "Unknown error"
+                await message.reply(f"Error:\n```\n{err[:1800]}\n```", mention_author=False)
+                return
+
+            text = current_text or result.get("text", "")
+            if text:
+                cleaned_text, actions = extract_bot_actions(text)
+
+                if sent_text_len > 0:
+                    unsent_raw = current_text[sent_text_len:] if sent_text_len < len(current_text) else ""
+                    final_cleaned, _ = extract_bot_actions(unsent_raw)
+                    final_text = final_cleaned.strip()
+                else:
+                    final_text = cleaned_text
+
+                if final_text:
+                    text_chunks = split_message(sanitize(final_text))
                     try:
-                        await channel.send(chunk)
-                    except Exception:
-                        pass
+                        await message.reply(text_chunks[0], mention_author=False)
+                    except Exception as e:
+                        log.warning(f"Failed to reply: {e}")
+                        try:
+                            await channel.send(text_chunks[0])
+                        except Exception as e2:
+                            log.warning(f"Fallback send also failed: {e2}")
+                    for chunk in text_chunks[1:]:
+                        try:
+                            await channel.send(chunk)
+                        except Exception as e:
+                            log.warning(f"Failed to send chunk: {e}")
+
+                if actions:
+                    action_results, pending_reload = await execute_bot_actions(actions, message, channel, guild_id)
+                    if action_results:
+                        remaining = sanitize("\n".join(action_results))
+                        for chunk in split_message(remaining):
+                            try:
+                                await channel.send(chunk)
+                            except Exception:
+                                pass
+                    if pending_reload:
+                        break
+
+            injected = await _pop_injected_inputs(ctx_key)
+            if not injected:
+                await asyncio.sleep(0)
+                injected = await _pop_injected_inputs(ctx_key)
+                if not injected:
+                    break
+            cleanup_paths.extend(
+                p for item in injected for p in item.get("attachments", []) if p
+            )
+            next_prompt = "\n\n".join(item["prompt"] for item in injected if item.get("prompt"))
 
     finally:
         typing_task.cancel()
-        for _, p in att_paths:
+        for p in cleanup_paths:
             try:
                 os.unlink(p)
             except OSError:
@@ -1105,8 +1196,8 @@ async def on_message(message: discord.Message):
         await client.close()
         return
 
-    if _self_modified():
-        log.info("codex_bot.py was modified during this run")
+    if _BOT_FILE.stat().st_mtime != _turn_start_mtime:
+        log.info("codex_bot.py was modified during this turn")
         await channel.send("codex_bot.py was modified. Say `reload` to apply changes.")
 
 
