@@ -1,0 +1,30 @@
+[project]
+name = "claudebot"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "aiohttp>=3.13.3",
+    "discord-ext-voice-recv>=0.5.2a179",
+    "discord-py[voice]>=2.0",
+    "faster-whisper>=1.2.1",
+    "kokoro>=0.9.4",
+    "numpy>=2.4.2",
+    "onnxruntime>=1.24.1",
+    "psutil>=7.2.2",
+    "python-dotenv>=1.2.1",
+    "scipy>=1.17.0",
+    "silero-vad>=6.2.0",
+    "soundfile>=0.13.1",
+    "torch>=2.6.0",
+    "transformers>=5.1.0",
+    "websockets>=16.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }

@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py -c:*)",
+      "Bash(timeout 10 py:*)",
+      "Bash(echo:*)",
+      "Bash(uv run python:*)",
+      "Bash(findstr:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(taskkill:*)",
+      "Bash(wmic process:*)",
+      "Bash(powershell \"Get-CimInstance Win32_Process | Where-Object { $_CommandLine -like ''*bot.py*'' } | Select-Object ProcessId, CommandLine\")",
+      "Bash(powershell:*)",
+      "Bash(start \"\" py run.py)"
+    ]
+  }
+}
