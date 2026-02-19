@@ -13,8 +13,8 @@ from pathlib import Path
 TASK_NAME = "claudebot"
 # pythonw.exe = windowless python — no console window
 PYTHON = str(Path(sys.executable).parent / "pythonw.exe")
-RUN_PY = str(Path(__file__).parent / "run.py")
-WORK_DIR = str(Path(__file__).parent)
+RUN_PY = str(Path(__file__).resolve().parent.parent / "run.py")
+WORK_DIR = str(Path(__file__).resolve().parent.parent)
 USERNAME = os.environ.get("USERNAME", "Lyra")
 DOMAIN = os.environ.get("USERDOMAIN", "DESKTOP")
 

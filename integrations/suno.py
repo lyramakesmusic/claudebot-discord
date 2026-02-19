@@ -1,7 +1,7 @@
 """
 Suno music generation module for claudebot.
 
-Extracted from bot.py — handles Suno API authentication (via Clerk),
+Extracted from bot.py â€” handles Suno API authentication (via Clerk),
 music generation, polling, and download.
 """
 
@@ -20,13 +20,14 @@ import discord
 
 log = logging.getLogger("claudebot")
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# â”€â”€ Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 SUNO_COOKIE = os.getenv("SUNO_COOKIE", "")
-SUNO_MODEL = "chirp-crow"  # v5 — latest
-GENERATED_MUSIC_DIR = Path(__file__).parent / "generated_music"
+SUNO_MODEL = "chirp-crow"  # v5 â€” latest
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+GENERATED_MUSIC_DIR = PROJECT_ROOT / "data" / "generated_music"
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
+# â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class _SunoAuth:
     """Manages Suno authentication via Clerk token refresh."""
@@ -87,7 +88,7 @@ class _SunoAuth:
         """Force re-fetch of session_id on next get_token call."""
         self._session_id = None
         self._token = None
-        log.info("Suno session reset — will re-fetch on next call")
+        log.info("Suno session reset â€” will re-fetch on next call")
 
     async def get_token(self) -> str:
         """Get a fresh JWT token, refreshing if needed."""
@@ -101,7 +102,7 @@ class _SunoAuth:
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
                     "Cookie": self._raw_cookie,
                 }
-                # retry token fetch — Clerk 429s with text/html sometimes
+                # retry token fetch â€” Clerk 429s with text/html sometimes
                 for token_attempt in range(3):
                     async with session.post(
                         f"https://auth.suno.com/v1/client/sessions/{self._session_id}/tokens?__clerk_api_version=2025-11-10&_clerk_js_version=5.117.0",
@@ -125,7 +126,7 @@ class _SunoAuth:
                 raise ValueError("Clerk token endpoint rate limited after 3 retries")
 
 
-# ── Module state ──────────────────────────────────────────────────────────────
+# â”€â”€ Module state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _suno_auth: _SunoAuth | None = None
 _suno_queue: asyncio.Queue | None = None
@@ -141,7 +142,7 @@ def _get_suno_auth() -> _SunoAuth:
     return _suno_auth
 
 
-# ── Worker ────────────────────────────────────────────────────────────────────
+# â”€â”€ Worker â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def _suno_worker():
     """Process music generation jobs one at a time."""
@@ -169,7 +170,7 @@ async def _suno_worker():
             _suno_queue.task_done()
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def init_suno_worker() -> asyncio.Task:
     """Initialize the suno queue and start the worker task. Call from on_ready()."""
@@ -237,7 +238,7 @@ async def generate_music(
 
     try:
         async with aiohttp.ClientSession() as session:
-            # submit generation — retry on 429 with backoff
+            # submit generation â€” retry on 429 with backoff
             gen_data = None
             for gen_attempt in range(5):
                 async with session.post(
@@ -256,7 +257,7 @@ async def generate_music(
                         body = await resp.text()
                         log.warning(f"Suno 422 (attempt {gen_attempt + 1}/5) body={body[:500]}")
                         if "token" in body.lower() or "validation" in body.lower():
-                            # stale token — reset auth and retry quickly
+                            # stale token â€” reset auth and retry quickly
                             auth.reset_session()
                             try:
                                 token = await auth.get_token()
@@ -272,14 +273,14 @@ async def generate_music(
                     gen_data = await resp.json()
                     break
             if gen_data is None:
-                return None, "Suno rate limited (429) after retries — try again in a few minutes"
+                return None, "Suno rate limited (429) after retries â€” try again in a few minutes"
 
             # extract clip IDs to poll
             clips = gen_data.get("clips", [])
             if not clips:
                 return None, f"No clips in response: {json.dumps(gen_data)[:300]}"
             clip_ids = [c["id"] for c in clips]
-            log.info(f"Suno generation started: {len(clip_ids)} clips — {clip_ids}")
+            log.info(f"Suno generation started: {len(clip_ids)} clips â€” {clip_ids}")
 
             # poll for ALL clips to complete (up to 5 minutes)
             completed_urls: dict[str, str] = {}  # clip_id -> audio_url
@@ -331,7 +332,7 @@ async def generate_music(
                 if failed_clips:
                     first_err = next(iter(failed_clips.values()))
                     return [], f"Suno generation failed: {first_err}"
-                return [], "Suno generation timed out (5 min) — no clips completed"
+                return [], "Suno generation timed out (5 min) â€” no clips completed"
 
             # download all completed clips
             filepaths = []
@@ -359,3 +360,4 @@ async def generate_music(
 
     except Exception as e:
         return None, f"Suno request failed: {e}"
+

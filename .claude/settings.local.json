@@ -12,7 +12,9 @@
       "Bash(wmic process:*)",
       "Bash(powershell \"Get-CimInstance Win32_Process | Where-Object { $_CommandLine -like ''*bot.py*'' } | Select-Object ProcessId, CommandLine\")",
       "Bash(powershell:*)",
-      "Bash(start \"\" py run.py)"
+      "Bash(start \"\" py run.py)",
+      "Bash(tasklist:*)",
+      "Bash(python scripts/kill_all.py:*)"
     ]
   }
 }

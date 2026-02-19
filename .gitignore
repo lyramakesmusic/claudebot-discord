@@ -2,28 +2,25 @@
 .env
 .env.bak
 
-# State files
+# Runtime data
+data/
 state.json
-state.tmp
 codex_state.json
-codex_state.tmp
-
-# Logs
-claudebot.log
-codexbot.log
-selfbot/selfbot.log
-voice_debug.txt
-
-# Python
-__pycache__/
-*.pyc
-
-# Generated content
-img/
 attachments/
 codex_attachments/
 generated_images/
 generated_music/
+
+# Logs
+logs/
+selfbot/selfbot.log
+voice_debug.txt
+claudebot.log
+codexbot.log
+
+# Python
+__pycache__/
+*.pyc
 
 # Models (large binaries)
 models/
@@ -43,7 +40,6 @@ selfbot/nul
 reference/
 
 # Misc
-test_bridge.py
 nul
 .reload
 tmp_log_check.py

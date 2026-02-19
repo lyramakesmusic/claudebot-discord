@@ -2,6 +2,20 @@
 
 Discord bot that bridges to Claude Code.
 
+## Project Layout
+
+- `bot.py`: root wrapper that starts `claude/bot.py`
+- `codex_bot.py`: root wrapper that starts `codex/bot.py`
+- `claude/`: Claude Discord bot implementation
+- `codex/`: Codex Discord bot implementation
+- `shared/`: shared state/config/utility modules
+- `integrations/`: external integrations (council, suno, voice)
+- `supervisor/`: supervisor process lifecycle and health logic
+- `data/`: runtime state and generated artifacts
+- `logs/`: bot/supervisor logs
+- `scripts/`: operational scripts
+- `tests/`: test scripts
+
 ## Switching Claude Code Model
 
 The model is set in `~/.claude/settings.json`:
