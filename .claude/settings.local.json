@@ -14,7 +14,13 @@
       "Bash(powershell:*)",
       "Bash(start \"\" py run.py)",
       "Bash(tasklist:*)",
-      "Bash(python scripts/kill_all.py:*)"
+      "Bash(python scripts/kill_all.py:*)",
+      "Bash(.venv/Scripts/python.exe:*)",
+      "Bash(schtasks:*)",
+      "Bash(rm:*)",
+      "Bash(cmd.exe:*)",
+      "Bash(xxd:*)",
+      "Bash(ls:*)"
     ]
   }
 }

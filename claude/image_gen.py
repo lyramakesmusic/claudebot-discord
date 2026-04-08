@@ -145,6 +145,9 @@ async def bg_generate_image(
     ref_images: list[str] | None,
     caption: str = "",
     requester_id: int = 0,
+    trigger_msg=None,
+    ctx_key: str = None,
+    bridge=None,
 ):
     """Background task: generate image and post to channel when done."""
     try:
@@ -158,6 +161,15 @@ async def bg_generate_image(
                 msg = f"{msg}\n-# Cost: ${cost:.4f}".strip() if msg else f"-# Cost: ${cost:.4f}"
             await channel.send(msg or None, file=f)
             _log.info(f"BG image delivered: {filepath}")
+            # Notify Claude Code so it can see the result
+            if filepath and ctx_key and bridge:
+                pp = bridge.get_process(ctx_key)
+                if pp and pp._alive:
+                    notify = (
+                        f"[Image generated — saved at {filepath}. "
+                        f"You can Read it to see what was generated.]"
+                    )
+                    await pp.send(notify)
     except Exception:
         _log.exception("Background image generation error")
         try:

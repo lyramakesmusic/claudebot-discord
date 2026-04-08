@@ -9,17 +9,25 @@ import sys
 import time
 from pathlib import Path
 
+# Ensure project root is on sys.path (needed when run as subprocess)
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from shared.lockfile import LOCKFILE_EXIT_CODE, LOCKFILE_STDERR_MARKER
 from supervisor.forensics import capture_crash_info
-from supervisor.health import check_heartbeat, write_supervisor_heartbeat
+from supervisor.health import write_supervisor_heartbeat
 from supervisor.process import BotProcess
 
-WATCH_FILES = [".env"]
 RESTART_DELAY = 2
 POLL_INTERVAL = 1
 MAX_RAPID_RESTARTS = 5
 RAPID_WINDOW = 30
 BACKOFF_DELAY = 15
-CREATE_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+LOCK_CONFLICT_RETRY_DELAY = 5
+# CREATE_NEW_PROCESS_GROUP isolates each bot so a signal to one
+# can't cascade and kill the supervisor, siblings, or unrelated processes.
+CREATE_FLAGS = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
 
 
 def _setup_logging(root: Path) -> logging.Logger:
@@ -38,14 +46,6 @@ def _setup_logging(root: Path) -> logging.Logger:
     return logger
 
 
-def _get_mtimes(root: Path) -> dict[str, float]:
-    out = {}
-    for name in WATCH_FILES:
-        p = root / name
-        if p.exists():
-            out[name] = p.stat().st_mtime
-    return out
-
 
 def _venv_python(root: Path) -> str:
     if os.name == "nt":
@@ -53,31 +53,53 @@ def _venv_python(root: Path) -> str:
     return str(root / ".venv" / "bin" / "python")
 
 
+def _start_bot(cmd: list[str], cwd: str) -> subprocess.Popen:
+    """Start a bot process. stderr goes to devnull to prevent pipe buffer deadlocks.
+
+    Previously stderr was captured via PIPE, but nobody read the pipe while
+    the process was alive. After hours of discord.py logging to stderr, the
+    64KB pipe buffer filled up and the write() call blocked while holding
+    Python's logging lock — deadlocking the event loop and the Discord
+    heartbeat thread simultaneously.
+    """
+    return subprocess.Popen(
+        cmd, cwd=cwd, creationflags=CREATE_FLAGS,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def _start_claude(root: Path) -> subprocess.Popen:
-    return subprocess.Popen([
-        _venv_python(root), str(root / "bot.py")
-    ], cwd=str(root), creationflags=CREATE_FLAGS)
+    return _start_bot(
+        [_venv_python(root), str(root / "bot.py")], str(root),
+    )
 
 
 def _start_codex(root: Path) -> subprocess.Popen:
-    return subprocess.Popen([
-        _venv_python(root), str(root / "codex_bot.py")
-    ], cwd=str(root), creationflags=CREATE_FLAGS)
+    return _start_bot(
+        [_venv_python(root), str(root / "codex_bot.py")], str(root),
+    )
+
 
 
 def _start_selfbot(root: Path) -> subprocess.Popen | None:
     script = root / "selfbot" / "self.py"
     if not script.exists():
         return None
-    return subprocess.Popen([
-        sys.executable, str(script)
-    ], cwd=str(root), creationflags=CREATE_FLAGS)
+    return _start_bot(
+        [_venv_python(root), str(script)], str(root),
+    )
+
+
 
 
 def main():
     root = Path(__file__).resolve().parent.parent
+
+    # Acquire supervisor lock — prevents duplicate supervisors.
+    from shared.lockfile import acquire_or_exit
+    acquire_or_exit("supervisor")
+
     log = _setup_logging(root)
-    mtimes = _get_mtimes(root)
 
     bots: dict[str, BotProcess] = {
         "claudebot": BotProcess(
@@ -120,36 +142,32 @@ def main():
         while True:
             time.sleep(POLL_INTERVAL)
 
-            new_mtimes = _get_mtimes(root)
-            changed = [f for f in WATCH_FILES if new_mtimes.get(f) != mtimes.get(f)]
-            if changed:
-                mtimes = new_mtimes
-                log.info("file changed: %s; restarting all", ", ".join(changed))
-                for bp in bots.values():
-                    bp.terminate()
-                time.sleep(RESTART_DELAY)
-                for name, bp in bots.items():
-                    bp.start()
-                    log.info("%s restarted (pid=%s)", name, bp.pid)
-                continue
-
             for name, bp in bots.items():
                 ret = bp.poll()
-                if ret is not None:
-                    log.warning("%s exited with code %s", name, ret)
-                    capture_crash_info(name, bp.pid, ret, root)
-                    bp.register_crash_backoff()
-                    bp.start()
-                    log.info("%s restarted (pid=%s)", name, bp.pid)
+                if ret is None:
                     continue
 
-                if not check_heartbeat(root, "claude" if name == "claudebot" else "codex" if name == "codexbot" else "selfbot"):
-                    log.warning("%s heartbeat stale, restarting", name)
-                    capture_crash_info(name, bp.pid, -100, root)
-                    bp.terminate()
-                    bp.register_crash_backoff()
+                # Lockfile duplicate: another instance is already running.
+                if ret == LOCKFILE_EXIT_CODE:
+                    log.info(
+                        "%s exited: another instance already running (code=%s); retrying in %ss",
+                        name, ret, LOCK_CONFLICT_RETRY_DELAY,
+                    )
+                    time.sleep(LOCK_CONFLICT_RETRY_DELAY)
                     bp.start()
-                    log.info("%s restarted after stale heartbeat (pid=%s)", name, bp.pid)
+                    log.info("%s restart retry (pid=%s)", name, bp.pid)
+                    continue
+
+                # Bot died on its own. Log, back off, restart.
+                uptime = time.time() - bp.start_time if bp.start_time else 0
+                log.warning(
+                    "%s exited with code %s (pid=%s uptime=%.0fs)",
+                    name, ret, bp.pid, uptime,
+                )
+                capture_crash_info(name, bp.pid, ret, root, uptime=uptime)
+                bp.register_crash_backoff()
+                bp.start()
+                log.info("%s restarted (pid=%s)", name, bp.pid)
 
             write_supervisor_heartbeat(root, bots)
 

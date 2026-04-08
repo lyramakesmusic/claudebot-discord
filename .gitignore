@@ -3,7 +3,10 @@
 .env.bak
 
 # Runtime data
-data/
+data/*
+!data/config/
+data/config/*
+!data/config/*.json
 state.json
 codex_state.json
 attachments/
@@ -38,6 +41,13 @@ selfbot/nul
 
 # Reference repos
 reference/
+
+# Archives
+*.zip
+
+# Experiments / external
+discord-bridge/
+PLUGIN_PLAN.md
 
 # Misc
 nul

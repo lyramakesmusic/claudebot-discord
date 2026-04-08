@@ -295,8 +295,15 @@ async def execute_bot_actions(
             # build/extend conversation history for this thread
             ch_id = channel.id
             if ch_id not in _council_gpt_history:
+                # evict oldest channels if at capacity
+                if len(_council_gpt_history) >= 50:
+                    oldest_key = next(iter(_council_gpt_history))
+                    del _council_gpt_history[oldest_key]
                 _council_gpt_history[ch_id] = []
             _council_gpt_history[ch_id].append({"role": "user", "content": gpt_msg})
+            # cap messages per channel (keep most recent)
+            if len(_council_gpt_history[ch_id]) > 20:
+                _council_gpt_history[ch_id] = _council_gpt_history[ch_id][-20:]
             # call GPT
             gpt_result = await call_gpt(_council_gpt_history[ch_id])
             if gpt_result["error"]:

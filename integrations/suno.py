@@ -1,7 +1,7 @@
 """
 Suno music generation module for claudebot.
 
-Extracted from bot.py â€” handles Suno API authentication (via Clerk),
+Extracted from bot.py - handles Suno API authentication (via Clerk),
 music generation, polling, and download.
 """
 
@@ -20,14 +20,17 @@ import discord
 
 log = logging.getLogger("claudebot")
 
-# â”€â”€ Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ Config â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 SUNO_COOKIE = os.getenv("SUNO_COOKIE", "")
-SUNO_MODEL = "chirp-crow"  # v5 â€” latest
+SUNO_MODEL = "chirp-crow"  # fallback default
+SUNO_CUSTOM_MODELS: dict[str, str] = {}
+SUNO_DEFAULT_MODEL = "chirp-crow"  # updated by _fetch_models
+SUNO_MODEL_DESCRIPTIONS: dict[str, str] = {}  # name -> description for sysprompt
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 GENERATED_MUSIC_DIR = PROJECT_ROOT / "data" / "generated_music"
 
-# â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ Auth â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 class _SunoAuth:
     """Manages Suno authentication via Clerk token refresh."""
@@ -88,7 +91,7 @@ class _SunoAuth:
         """Force re-fetch of session_id on next get_token call."""
         self._session_id = None
         self._token = None
-        log.info("Suno session reset â€” will re-fetch on next call")
+        log.info("Suno session reset - will re-fetch on next call")
 
     async def get_token(self) -> str:
         """Get a fresh JWT token, refreshing if needed."""
@@ -102,7 +105,7 @@ class _SunoAuth:
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
                     "Cookie": self._raw_cookie,
                 }
-                # retry token fetch â€” Clerk 429s with text/html sometimes
+                # retry token fetch - Clerk 429s with text/html sometimes
                 for token_attempt in range(3):
                     async with session.post(
                         f"https://auth.suno.com/v1/client/sessions/{self._session_id}/tokens?__clerk_api_version=2025-11-10&_clerk_js_version=5.117.0",
@@ -126,7 +129,7 @@ class _SunoAuth:
                 raise ValueError("Clerk token endpoint rate limited after 3 retries")
 
 
-# â”€â”€ Module state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ Module state â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 _suno_auth: _SunoAuth | None = None
 _suno_queue: asyncio.Queue | None = None
@@ -142,16 +145,16 @@ def _get_suno_auth() -> _SunoAuth:
     return _suno_auth
 
 
-# â”€â”€ Worker â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ Worker â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 async def _suno_worker():
     """Process music generation jobs one at a time."""
     log.info("Suno worker started, waiting for jobs...")
     while True:
-        channel, style, lyrics, title = await _suno_queue.get()
-        log.info(f"Suno worker picked up job: style={style[:50]} title={title}")
+        channel, style, lyrics, title, model = await _suno_queue.get()
+        log.info(f"Suno worker picked up job: style={style[:50]} title={title} model={model or 'default'}")
         try:
-            filepaths, err = await generate_music(style, lyrics, title)
+            filepaths, err = await generate_music(style, lyrics, title, model)
             if err:
                 # keep error messages short
                 short_err = err.split(":")[0] if len(err) > 120 else err
@@ -170,14 +173,119 @@ async def _suno_worker():
             _suno_queue.task_done()
 
 
-# â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ Model discovery â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+
+# Version name mapping for human-readable display
+_VERSION_NAMES = {
+    "chirp-crow": "v5", "chirp-fenix": "v5.5", "chirp-bluejay": "v4.5",
+    "chirp-auk": "v4", "chirp-auk-turbo": "v4 turbo",
+    "chirp-v4": "v4 (legacy)", "chirp-v3-5": "v3.5", "chirp-v3-0": "v3",
+    "chirp-v2-xxl-alpha": "v2",
+}
+
+
+async def _fetch_models():
+    """Fetch available models from Suno billing API and populate globals."""
+    global SUNO_MODEL, SUNO_DEFAULT_MODEL, SUNO_CUSTOM_MODELS, SUNO_MODEL_DESCRIPTIONS
+    try:
+        auth = _get_suno_auth()
+        token = await auth.get_token()
+    except Exception as e:
+        log.warning(f"[Suno] Can't fetch models (auth failed): {e}")
+        return
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "*/*",
+        "Referer": "https://suno.com/",
+        "Origin": "https://suno.com",
+        "Cookie": auth._raw_cookie,
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://studio-api.prod.suno.com/api/billing/info/",
+                headers=headers, timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status != 200:
+                    log.warning(f"[Suno] billing/info returned {resp.status}")
+                    return
+                data = await resp.json()
+    except Exception as e:
+        log.warning(f"[Suno] Failed to fetch billing info: {e}")
+        return
+
+    models = data.get("models", [])
+    if not models:
+        log.warning("[Suno] No models in billing response")
+        return
+
+    custom = {}
+    default_key = None
+    best_version = 0
+    descriptions = {}
+
+    for m in models:
+        key = m.get("external_key", "")
+        name = m.get("name", "")
+        is_custom = "custom" in m.get("badges", [])
+        is_default = m.get("is_default_model", False)
+        major = m.get("major_version", 0)
+        can_use = m.get("can_use", False)
+
+        if not can_use or not key:
+            continue
+
+        if is_custom:
+            custom[name] = key
+            descriptions[name] = f"custom finetune"
+        elif is_default:
+            default_key = key
+        elif major > best_version and not is_custom:
+            best_version = major
+            if not default_key:
+                default_key = key
+
+        # Track version name for non-custom
+        if not is_custom and key in _VERSION_NAMES:
+            descriptions[name] = _VERSION_NAMES[key]
+
+    if custom:
+        SUNO_CUSTOM_MODELS.update(custom)
+    if default_key:
+        SUNO_MODEL = default_key
+        SUNO_DEFAULT_MODEL = default_key
+
+    # Build description map for custom models
+    SUNO_MODEL_DESCRIPTIONS = {n: f"custom finetune" for n in custom}
+
+    default_label = _VERSION_NAMES.get(SUNO_MODEL, SUNO_MODEL)
+    log.info(
+        f"[Suno] Models loaded: default={default_label} ({SUNO_MODEL}), "
+        f"custom={list(custom.keys()) or 'none'}"
+    )
+
+
+def get_suno_model_info() -> str:
+    """Return a string describing available models for system prompts."""
+    default_label = _VERSION_NAMES.get(SUNO_MODEL, SUNO_MODEL)
+    if not SUNO_CUSTOM_MODELS:
+        return f"Default model: {default_label}."
+    parts = [f'"{name}"' for name in SUNO_CUSTOM_MODELS]
+    return f"Default: {default_label}. Custom models: {', '.join(parts)}."
+
+
+# â"€â"€ Public API â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 def init_suno_worker() -> asyncio.Task:
-    """Initialize the suno queue and start the worker task. Call from on_ready()."""
+    """Initialize the suno queue, fetch models, and start the worker task."""
     global _suno_queue, _suno_worker_task
     if _suno_queue is None:
         _suno_queue = asyncio.Queue()
         _suno_worker_task = asyncio.create_task(_suno_worker())
+        # Fire-and-forget model discovery
+        asyncio.create_task(_fetch_models())
     return _suno_worker_task
 
 
@@ -186,13 +294,14 @@ def enqueue_music(
     style: str,
     lyrics: str,
     title: str,
+    model: str = "",
 ):
     """Enqueue a music generation job. Processed one at a time by _suno_worker."""
-    _suno_queue.put_nowait((channel, style, lyrics, title))
+    _suno_queue.put_nowait((channel, style, lyrics, title, model))
 
 
 async def generate_music(
-    style: str, lyrics: str = "", title: str = "",
+    style: str, lyrics: str = "", title: str = "", model: str = "",
 ) -> tuple[list[str], str | None]:
     """Generate music via Suno. Returns (list_of_filepaths, error)."""
     GENERATED_MUSIC_DIR.mkdir(parents=True, exist_ok=True)
@@ -227,18 +336,21 @@ async def generate_music(
         "sec-fetch-site": "same-site",
     }
 
+    # Resolve model name — check custom models, fall back to default
+    resolved_model = SUNO_CUSTOM_MODELS.get(model.lower(), model) if model else SUNO_MODEL
+
     # custom mode: provide lyrics + style tags
     payload = {
         "prompt": lyrics or "",
         "tags": style,
-        "mv": SUNO_MODEL,
+        "mv": resolved_model,
         "title": title or "Untitled",
         "make_instrumental": not bool(lyrics),
     }
 
     try:
         async with aiohttp.ClientSession() as session:
-            # submit generation â€” retry on 429 with backoff
+            # submit generation - retry on 429 with backoff
             gen_data = None
             for gen_attempt in range(5):
                 async with session.post(
@@ -257,7 +369,7 @@ async def generate_music(
                         body = await resp.text()
                         log.warning(f"Suno 422 (attempt {gen_attempt + 1}/5) body={body[:500]}")
                         if "token" in body.lower() or "validation" in body.lower():
-                            # stale token â€” reset auth and retry quickly
+                            # stale token - reset auth and retry quickly
                             auth.reset_session()
                             try:
                                 token = await auth.get_token()
@@ -273,14 +385,14 @@ async def generate_music(
                     gen_data = await resp.json()
                     break
             if gen_data is None:
-                return None, "Suno rate limited (429) after retries â€” try again in a few minutes"
+                return None, "Suno rate limited (429) after retries - try again in a few minutes"
 
             # extract clip IDs to poll
             clips = gen_data.get("clips", [])
             if not clips:
                 return None, f"No clips in response: {json.dumps(gen_data)[:300]}"
             clip_ids = [c["id"] for c in clips]
-            log.info(f"Suno generation started: {len(clip_ids)} clips â€” {clip_ids}")
+            log.info(f"Suno generation started: {len(clip_ids)} clips - {clip_ids}")
 
             # poll for ALL clips to complete (up to 5 minutes)
             completed_urls: dict[str, str] = {}  # clip_id -> audio_url
@@ -332,7 +444,7 @@ async def generate_music(
                 if failed_clips:
                     first_err = next(iter(failed_clips.values()))
                     return [], f"Suno generation failed: {first_err}"
-                return [], "Suno generation timed out (5 min) â€” no clips completed"
+                return [], "Suno generation timed out (5 min) - no clips completed"
 
             # download all completed clips
             filepaths = []

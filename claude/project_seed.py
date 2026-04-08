@@ -65,9 +65,39 @@ async def seed_project(thread: discord.Thread, project_name: str, cwd: str, seed
     typing_task = asyncio.create_task(_keep_typing())
     await thread.typing()
 
+    current_text = ""
+    sent_text_len = 0
+
+    async def _flush_unsent_text():
+        nonlocal sent_text_len
+        if len(current_text) <= sent_text_len:
+            return
+        unsent = current_text[sent_text_len:]
+        cleaned, _ = _extract_bot_actions(unsent)
+        cleaned = cleaned.strip()
+        if cleaned:
+            for chunk in _split_message(_sanitize(cleaned)):
+                try:
+                    await thread.send(chunk)
+                except Exception:
+                    pass
+        sent_text_len = len(current_text)
+
+    async def on_text(full_text: str):
+        nonlocal current_text
+        current_text = full_text
+
+    async def on_tool(desc: str):
+        _log.info(f"seed tool: {desc}")
+        await _flush_unsent_text()
+        try:
+            await thread.send(desc)
+        except Exception:
+            pass
+
     try:
         pp = await _bridge.get_or_create(ctx_key, cwd, None, sys_prompt)
-        result = await pp.send(seed_msg)
+        result = await pp.send(seed_msg, on_text=on_text, on_tool=on_tool)
     except Exception as exc:
         typing_task.cancel()
         _log.exception(f"Seed project error for {project_name}")
@@ -90,15 +120,22 @@ async def seed_project(thread: discord.Thread, project_name: str, cwd: str, seed
             pass
         return
 
-    response = result.get("text", "").strip()
-    if not response:
+    text = current_text or result.get("text", "")
+    if not text and sent_text_len == 0:
         return
 
     srv_name = getattr(thread.guild, "name", "") if thread.guild else ""
-    response = _process_memory_actions(response, thread.name, srv_name, guild_id)
-    response = _process_reminder_actions(response, thread.id, thread.name)
-    response, _ = _extract_bot_actions(response)
+    text = _process_memory_actions(text, thread.name, srv_name, guild_id)
+    text = _process_reminder_actions(text, thread.id, thread.name)
 
+    # only send the portion not already flushed during tool calls
+    if sent_text_len > 0:
+        unsent_raw = current_text[sent_text_len:] if sent_text_len < len(current_text) else ""
+        response, _ = _extract_bot_actions(unsent_raw)
+    else:
+        response, _ = _extract_bot_actions(text)
+
+    response = response.strip()
     if response:
         for chunk in _split_message(_sanitize(response)):
             try:

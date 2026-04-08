@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -35,6 +36,23 @@ class _TurnState:
         self.turn_id: str | None = None
         self.on_text = None
         self.on_tool = None
+
+
+def _clean_shell_cmd(item: dict) -> str:
+    """Clean up shell command for display: strip powershell path and wrapper."""
+    cmd_str = item.get("command", "") or item.get("call", {}).get("name", "command")
+    cmd_str = str(cmd_str)
+    # Strip full powershell path
+    cmd_str = cmd_str.replace(
+        r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe", "powershell"
+    ).replace(
+        r"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "powershell"
+    )
+    # Strip "powershell" -Command "..." wrapper, keeping just the inner command
+    m = re.match(r'^"?powershell"?\s+-Command\s+"(.*)"$', cmd_str, re.DOTALL)
+    if m:
+        cmd_str = m.group(1)
+    return cmd_str
 
 
 class CodexAppServer:
@@ -263,12 +281,7 @@ class CodexAppServer:
             if turn and item_id and item_id not in turn._seen_tool_ids and item_type not in _SKIP_TYPES:
                 turn._seen_tool_ids.add(item_id)
                 if item_type in ("commandexecution", "command_execution", "shell"):
-                    cmd_str = item.get("command", "") or item.get("call", {}).get("name", "command")
-                    cmd_str = str(cmd_str).replace(
-                        r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe", "powershell"
-                    ).replace(
-                        r"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "powershell"
-                    )
+                    cmd_str = _clean_shell_cmd(item)
                     desc = f"Shell(`{cmd_str[:80]}`)"
                 else:
                     call = item.get("call", {})
@@ -290,12 +303,7 @@ class CodexAppServer:
             if turn and item_id and item_id not in turn._seen_tool_ids and item_type not in _SKIP_TYPES:
                 turn._seen_tool_ids.add(item_id)
                 if item_type in ("commandexecution", "command_execution", "shell"):
-                    cmd_str = item.get("command", "") or item.get("call", {}).get("name", "command")
-                    cmd_str = str(cmd_str).replace(
-                        r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe", "powershell"
-                    ).replace(
-                        r"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "powershell"
-                    )
+                    cmd_str = _clean_shell_cmd(item)
                     desc = f"Shell(`{cmd_str[:80]}`)"
                 else:
                     call = item.get("call", {})

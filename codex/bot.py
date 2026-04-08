@@ -29,11 +29,14 @@ from codex.bridge import configure as configure_bridge
 from codex.prompts import build_system_context as build_system_context_prompt
 from codex.prompts import build_thread_context as build_thread_context_prompt
 from shared.bot_actions import extract_bot_actions
+
 from shared.discord_utils import guild_docs_dir as _guild_docs_dir
 from shared.discord_utils import guild_slug as _guild_slug
 from shared.discord_utils import is_guild_channel as _is_guild_channel
 from shared.discord_utils import sanitize
 from shared.discord_utils import split_message
+from shared.plugin import PluginContext
+from shared.plugin_loader import load_plugins
 from shared.state import BotState
 
 load_dotenv()
@@ -74,7 +77,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
     handlers=[
         logging.FileHandler(PROJECT_ROOT / "logs" / "codexbot.log", encoding="utf-8"),
-        logging.StreamHandler(),
     ],
 )
 
@@ -95,21 +97,105 @@ intents.guilds = True
 
 client = discord.Client(intents=intents)
 configure_actions(state, log, _BOT_FILE, DOCUMENTS_DIR)
+_plugin_mgr = None
+_plugin_tasks: list[asyncio.Task] = []
 
 
-async def _heartbeat_loop():
-    """Write heartbeat file every 30 seconds."""
-    hb_file = PROJECT_ROOT / "data" / "heartbeat_codex.json"
-    while not client.is_closed():
+def _read_plugin_names(config_path: Path, default_names: list[str]) -> list[str]:
+    try:
+        if config_path.exists():
+            data = json.loads(config_path.read_text("utf-8"))
+            if isinstance(data, list) and all(isinstance(x, str) for x in data):
+                return data
+    except Exception as exc:
+        log.warning(f"Failed to load plugin config {config_path}: {exc}")
+    return default_names
+
+
+def _register_plugin_task(coro):
+    task = asyncio.create_task(coro)
+    _plugin_tasks.append(task)
+    def _on_done(done_task: asyncio.Task):
         try:
-            hb_file.parent.mkdir(parents=True, exist_ok=True)
-            hb_file.write_text(
-                json.dumps({"timestamp": time.time(), "pid": os.getpid()}),
-                "utf-8",
-            )
-        except Exception:
+            _plugin_tasks.remove(done_task)
+        except ValueError:
             pass
-        await asyncio.sleep(30)
+        if done_task.cancelled():
+            return
+        exc = done_task.exception()
+        if exc:
+            log.exception(f"Plugin background task failed: {exc}")
+    task.add_done_callback(_on_done)
+
+
+async def _legacy_plugin_dispatch(action, message, channel, guild_id, **kwargs):
+    results, reload_flag = await dispatch_bot_actions([action], message, channel, guild_id)
+    return {
+        "results": results,
+        "reload": reload_flag,
+        "files": [],
+        "council_feedback": [],
+    }
+
+
+async def _legacy_plugin_event(event_name: str, *args, **kwargs):
+    return None
+
+
+async def _legacy_plugin_command(cmd: str, message, channel, **kwargs) -> bool:
+    return False
+
+
+async def _load_plugins():
+    global _plugin_mgr
+    if _plugin_mgr is not None:
+        return
+    default_names = ["upload", "image_gen", "project_mgmt"]
+    config_path = PROJECT_ROOT / "data" / "config" / "codex_plugins.json"
+    plugin_names = _read_plugin_names(config_path, default_names)
+    ctx = PluginContext(
+        client=client,
+        bridge=bridge,
+        state=state,
+        log=log,
+        project_root=PROJECT_ROOT,
+        documents_dir=DOCUMENTS_DIR,
+        owner_id=0,
+        env=dict(os.environ),
+        register_task=_register_plugin_task,
+        extra={
+            "legacy_dispatch": _legacy_plugin_dispatch,
+            "legacy_event": _legacy_plugin_event,
+            "legacy_command": _legacy_plugin_command,
+            "bot_file": _BOT_FILE,
+            "create_flags": CREATE_FLAGS,
+            "home_channel_id": HOME_CHANNEL_ID,
+            "typing_interval": TYPING_INTERVAL,
+        },
+    )
+    _plugin_mgr = await load_plugins(plugin_names, ctx)
+    loaded = [p.name for p in _plugin_mgr.plugins]
+    log.info(f"Loaded plugins: {', '.join(loaded) if loaded else '(none)'}")
+
+
+async def _dispatch_actions(actions, message, channel, guild_id):
+    all_results: list[str] = []
+    pending_reload = False
+    for action in actions:
+        action_name = action.get("action", "")
+        handled = False
+        payload = {}
+        if _plugin_mgr is not None:
+            handled, payload = await _plugin_mgr.dispatch_action(
+                action_name, action, message, channel, guild_id
+            )
+        if not handled:
+            results, reload_flag = await dispatch_bot_actions([action], message, channel, guild_id)
+            payload = {"results": results, "reload": reload_flag}
+        all_results.extend(payload.get("results", []) or [])
+        pending_reload = pending_reload or bool(payload.get("reload", False))
+    return all_results, pending_reload
+
 
 
 async def _queue_injected_input(ctx_key: str, prompt: str, attachments: list[str]) -> int:
@@ -155,9 +241,7 @@ async def on_ready():
         log.info("Codex app-server ready")
     except Exception as e:
         log.error(f"Failed to start codex app-server: {e}")
-    if not hasattr(client, "_heartbeat_task_started"):
-        client._heartbeat_task_started = True
-        asyncio.create_task(_heartbeat_loop())
+    await _load_plugins()
 
 
 @client.event
@@ -366,6 +450,16 @@ async def on_message(message: discord.Message):
         )
     else:
         sys_prompt = build_thread_context_prompt()
+    if _plugin_mgr is not None:
+        plugin_sections = _plugin_mgr.get_prompt_sections(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            channel_name=getattr(channel, "name", ""),
+            server_name=guild.name if guild else "",
+            is_orchestrator=is_orchestrator,
+        )
+        if plugin_sections:
+            sys_prompt = f"{sys_prompt}\n\n" + "\n\n".join(plugin_sections)
 
     cleanup_paths = [p for _, p in att_paths]
 
@@ -481,7 +575,7 @@ async def on_message(message: discord.Message):
                             log.warning(f"Failed to send chunk: {e}")
 
                 if actions:
-                    action_results, pending_reload = await dispatch_bot_actions(actions, message, channel, guild_id)
+                    action_results, pending_reload = await _dispatch_actions(actions, message, channel, guild_id)
                     if action_results:
                         remaining = sanitize("\n".join(action_results))
                         for chunk in split_message(remaining):
@@ -542,7 +636,9 @@ def main():
         raise SystemExit(1)
 
     print("Starting codex_bot (app-server mode)...")
-    client.run(DISCORD_TOKEN)
+    from shared.watchdog import start_watchdog
+    start_watchdog()
+    client.run(DISCORD_TOKEN, log_handler=None)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,11 @@ from datetime import datetime, timezone, timedelta
 
 import aiohttp
 
+# Single-instance enforcement
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from shared.lockfile import acquire_or_exit
+acquire_or_exit("selfbot")
+
 # Add the modified discord.py package to the import path
 SELFBOT_DIR = Path(__file__).parent
 PACKAGE_DIR = SELFBOT_DIR.parent / "selfbot discordpy package"
@@ -62,7 +67,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
     handlers=[
         logging.FileHandler(SELFBOT_DIR / "selfbot.log", encoding="utf-8"),
-        logging.StreamHandler(),
     ],
 )
 
@@ -395,6 +399,7 @@ async def run_claude(prompt: str, cwd: str, session_id: str = None) -> dict:
     if session_id:
         cmd += ["--resume", session_id]
 
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -402,6 +407,7 @@ async def run_claude(prompt: str, cwd: str, session_id: str = None) -> dict:
         cwd=cwd,
         creationflags=CREATE_FLAGS,
         limit=1024 * 1024,  # 1MB line buffer (default 64KB too small for large responses)
+        env=env,
     )
 
     text = ""
@@ -620,6 +626,7 @@ async def on_ready():
     log.info(f"Selfbot logged in as {client.user} (ID: {client.user.id})")
     # Note: reminder firing is handled by the main bot (bot.py) since pings
     # from the selfbot (user's own token) are auto-read and don't notify.
+
 
 
 @client.event
@@ -909,4 +916,6 @@ if __name__ == "__main__":
         raise SystemExit(1)
 
     print("Starting selfbot...")
-    client.run(SELFBOT_TOKEN)
+    from shared.watchdog import start_watchdog
+    start_watchdog()
+    client.run(SELFBOT_TOKEN, log_handler=None)

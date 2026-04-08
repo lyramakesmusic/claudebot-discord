@@ -2,9 +2,13 @@
 
 import os
 import re
+import time
 from pathlib import Path
 
 import discord
+
+# 24 hours in seconds
+_MAX_AGE = 24 * 60 * 60
 
 
 async def collect_message_attachments(
@@ -12,6 +16,8 @@ async def collect_message_attachments(
 ) -> list[tuple[str, str]]:
     """Download attachments and optionally extract PDF text."""
     att_dir.mkdir(parents=True, exist_ok=True)
+    # opportunistically prune old files each time we download new ones
+    cleanup_old_attachments(att_dir)
     att_paths: list[tuple[str, str]] = []
 
     for att in message.attachments:
@@ -49,15 +55,21 @@ async def collect_message_attachments(
 
 
 def cleanup_message_attachments(att_paths: list[tuple[str, str]]):
-    """Best-effort cleanup for downloaded temporary attachment files."""
-    for _, path in att_paths:
+    """No-op: attachments are kept for 24h and cleaned up by cleanup_old_attachments."""
+    pass
+
+
+def cleanup_old_attachments(att_dir: Path):
+    """Delete attachment files older than 24 hours."""
+    if not att_dir.is_dir():
+        return
+    now = time.time()
+    for f in att_dir.iterdir():
+        if not f.is_file():
+            continue
         try:
-            os.unlink(path)
+            age = now - f.stat().st_mtime
+            if age > _MAX_AGE:
+                f.unlink()
         except OSError:
             pass
-        if path.endswith(".txt"):
-            pdf_path = path.rsplit(".", 1)[0] + ".pdf"
-            try:
-                os.unlink(pdf_path)
-            except OSError:
-                pass

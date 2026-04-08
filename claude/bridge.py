@@ -10,7 +10,9 @@ from pathlib import Path
 
 CLAUDE_CMD = "claude"
 CLAUDE_MODEL = ""
-CREATE_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+# CREATE_NEW_PROCESS_GROUP isolates the CLI so interrupt signals
+# can't cascade to the bot, supervisor, or unrelated processes.
+CREATE_FLAGS = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
 log = None
 
 
@@ -25,7 +27,7 @@ class _TurnState:
     """Tracks the state of a single userâ†’assistant turn."""
 
     def __init__(self):
-        self.text = ""                  # accumulated text for this turn
+        self._text_parts: list[str] = []  # accumulate deltas in a list (avoids O(N^2) string concat)
         self.last_text_snapshot = ""    # for delta tracking within a turn
         self.tools: list[str] = []
         self._seen_tool_ids: set[str] = set()  # deduplicate tool_use with partial messages
@@ -37,6 +39,17 @@ class _TurnState:
         self.input_tokens: int = 0
         self.cache_creation_tokens: int = 0
         self.cache_read_tokens: int = 0
+
+    @property
+    def text(self) -> str:
+        """Join accumulated text parts. Collapses list to avoid repeated joins."""
+        if len(self._text_parts) > 1:
+            self._text_parts = ["".join(self._text_parts)]
+        return self._text_parts[0] if self._text_parts else ""
+
+    def append_text(self, delta: str):
+        """Append a delta without copying the full accumulated string."""
+        self._text_parts.append(delta)
 
 
 class _PersistentProcess:
@@ -73,10 +86,19 @@ class _PersistentProcess:
         model = self.model or CLAUDE_MODEL
         if model:
             cmd += ["--model", model]
+        # Write system prompt to a temp file and pass via --system-prompt-file
+        # (avoids Windows command-line length limit AND uses proper system prompt mechanism)
+        if self.system_prompt:
+            import tempfile
+            self._sys_prompt_file = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".md", delete=False, encoding="utf-8",
+                dir=str(Path(os.environ.get("TEMP", "/tmp"))),
+            )
+            self._sys_prompt_file.write(self.system_prompt)
+            self._sys_prompt_file.close()
+            cmd += ["--system-prompt-file", self._sys_prompt_file.name]
         if session_id:
             cmd += ["--resume", session_id]
-            # still send system prompt on first message so updated instructions
-            # (new tools, changed rules) reach the resumed session
         cmd += self.extra_args
 
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
@@ -96,7 +118,28 @@ class _PersistentProcess:
         self._alive = True
         self._created_at = _time.time()
         self._reader_task = asyncio.create_task(self._read_loop())
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
         log.info(f"Persistent process started for {self.ctx_key} (pid={self.proc.pid})")
+
+    async def _drain_stderr(self):
+        """Continuously drain stderr to prevent pipe buffer deadlock.
+
+        On Windows, pipe buffers are ~64KB. If claude.exe writes enough to stderr
+        to fill this buffer and nobody reads it, claude.exe blocks on the write.
+        This blocks ALL I/O from claude.exe (including stdout), which deadlocks
+        the entire bridge. We keep the last chunk for crash diagnostics.
+        """
+        self._last_stderr = ""
+        try:
+            while self._alive and self.proc and self.proc.returncode is None:
+                data = await self.proc.stderr.read(8192)
+                if not data:
+                    break
+                self._last_stderr = data.decode("utf-8", errors="replace").strip()[-1000:]
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
 
     async def _read_loop(self):
         """Background task: read NDJSON from stdout, dispatch to current turn."""
@@ -145,7 +188,7 @@ class _PersistentProcess:
                             else:
                                 delta = block_text
                             turn.last_text_snapshot = block_text
-                            turn.text += delta
+                            turn.append_text(delta)
                             if turn.on_text:
                                 try:
                                     await turn.on_text(turn.text)
@@ -194,14 +237,8 @@ class _PersistentProcess:
             log.exception(f"Reader loop error for {self.ctx_key}")
         finally:
             self._alive = False
-            # capture stderr for diagnostics
-            stderr_text = ""
-            if self.proc and self.proc.stderr:
-                try:
-                    stderr_bytes = await asyncio.wait_for(self.proc.stderr.read(), timeout=2)
-                    stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
-                except Exception:
-                    pass
+            # use stderr captured by _drain_stderr task
+            stderr_text = getattr(self, "_last_stderr", "")
             rc = self.proc.returncode if self.proc else "?"
             if stderr_text:
                 log.warning(f"Process {self.ctx_key} stderr (rc={rc}): {stderr_text[:500]}")
@@ -294,7 +331,17 @@ class _PersistentProcess:
         """Interrupt the current response (like pressing Escape in Claude Code).
         Process stays alive with context preserved."""
         if self.proc and self.proc.returncode is None and self._turn:
-            os.kill(self.proc.pid, signal.CTRL_C_EVENT)
+            # CTRL_BREAK_EVENT targets only the process's own group
+            # (safe because CLI is started with CREATE_NEW_PROCESS_GROUP).
+            # CTRL_C_EVENT is ignored for new process groups on Windows.
+            if os.name == "nt":
+                try:
+                    os.kill(self.proc.pid, signal.CTRL_BREAK_EVENT)
+                except OSError as e:
+                    # Can happen transiently if process handle is already closing.
+                    log.warning(f"interrupt failed for {self.ctx_key} pid={self.proc.pid}: {e}")
+            else:
+                self.proc.send_signal(signal.SIGINT)
 
     async def kill(self):
         """Terminate the process."""
@@ -305,11 +352,14 @@ class _PersistentProcess:
             except Exception:
                 pass
             try:
-                await self.proc.wait()
-            except Exception:
+                await asyncio.wait_for(self.proc.wait(), timeout=5)
+            except (asyncio.TimeoutError, Exception):
                 pass
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
+        stderr_task = getattr(self, "_stderr_task", None)
+        if stderr_task and not stderr_task.done():
+            stderr_task.cancel()
         log.info(f"Killed persistent process for {self.ctx_key}")
 
 
@@ -356,6 +406,14 @@ class ClaudeBridge:
             return pp
         return None
 
+    async def cleanup_dead(self):
+        """Remove dead processes from the cache to free memory."""
+        dead = [k for k, pp in self._procs.items() if not pp.alive]
+        for k in dead:
+            pp = self._procs.pop(k, None)
+            if pp:
+                await pp.kill()
+
     # Keep old interface for compatibility during transition
     async def run(
         self,
@@ -385,9 +443,12 @@ def _tool_description(name: str, inp: dict) -> str:
         desc += f"({inp['pattern'][:30]})"
     elif name == "Task" and "description" in inp:
         desc += f"({inp['description'][:30]})"
+    elif name == "WebSearch" and "query" in inp:
+        desc += f"(`{inp['query'][:60]}`)"
+    elif name == "WebFetch" and "url" in inp:
+        desc += f"(`{inp['url'][:80]}`)"
     return desc
 
 
 # â”€â”€ System Monitor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 

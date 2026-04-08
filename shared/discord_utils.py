@@ -28,8 +28,10 @@ def split_message(text: str, limit: int = MAX_DISCORD_LEN) -> list[str]:
 
 
 def sanitize(text: str) -> str:
-    """Prevent accidental @everyone/@here pings."""
-    return text.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+    """Prevent accidental @everyone/@here pings and collapse excessive newlines."""
+    text = text.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
 
 
 def is_guild_channel(channel: discord.abc.Messageable) -> bool:

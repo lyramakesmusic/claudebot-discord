@@ -2,6 +2,27 @@
 
 Discord bot that bridges to Claude Code.
 
+## ⚠️ CRITICAL — DO NOT MODIFY FROM OUTSIDE THIS PROJECT
+
+**This codebase is PRODUCTION INFRASTRUCTURE.** It runs 24/7 and is the owner's
+only way to communicate with her AI assistants remotely. If it breaks while she
+is away from her desktop, she has NO way to fix it.
+
+**Rules for ALL Claude Code sessions (including those in other projects):**
+
+1. **NEVER wire external projects into claudebot.** If a project needs a Discord
+   bot, build it standalone — do NOT import from, modify, or integrate with this
+   codebase unless the user EXPLICITLY says "modify claudebot" in THIS project's
+   thread.
+2. **NEVER modify files in this directory** (`C:\Users\Lyra\Documents\claudebot\`)
+   from a session whose cwd is elsewhere. If you find yourself reaching into this
+   path from another project — STOP. You are about to break production.
+3. **NEVER add dependencies, change supervisor config, or touch .env** from outside.
+4. If you think you need to integrate with claudebot, **ask the user first**.
+   The answer is almost certainly "no, make it standalone."
+
+Violations of these rules have caused multi-hour outages requiring manual rescue.
+
 ## Project Layout
 
 - `bot.py`: root wrapper that starts `claude/bot.py`

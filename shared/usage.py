@@ -6,7 +6,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-CONTEXT_WINDOW = 190_000  # effective limit (Claude Code reserves ~10k for compaction)
+CONTEXT_WINDOW = 990_000  # effective limit (1M window, Claude Code reserves ~10k for compaction)
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 
 
