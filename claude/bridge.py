@@ -72,6 +72,8 @@ class _PersistentProcess:
         self._send_lock = asyncio.Lock()  # prevents concurrent send() calls
         self._first_msg = True  # prepend system prompt to first message
         self._created_at: float = 0.0  # set in start()
+        self._injections: list[str] = []  # messages injected during current turn
+        self.on_unsolicited = None  # async fn(text, tools) — called when Claude responds between turns
 
     async def start(self, session_id: str = None):
         """Spawn the claude process."""
@@ -163,13 +165,47 @@ class _PersistentProcess:
                 msg_type = data.get("type")
                 turn = self._turn
 
-                if msg_type == "system" and data.get("subtype") == "init":
-                    sid = data.get("session_id")
-                    if sid:
-                        self.session_id = sid
+                if msg_type == "system":
+                    subtype = data.get("subtype")
+                    if subtype == "init":
+                        sid = data.get("session_id")
+                        if sid:
+                            self.session_id = sid
                     continue
 
                 if not turn:
+                    # Between turns — handle unsolicited responses (e.g. background task completions).
+                    # Claude Code processes task-notifications internally and streams a response
+                    # even without a user prompt. Capture and relay via callback.
+                    if msg_type == "assistant" and self.on_unsolicited:
+                        for block in data.get("message", {}).get("content", []):
+                            bt = block.get("type")
+                            if bt == "text" and block.get("text"):
+                                # accumulate in a buffer, dispatch on result
+                                if not hasattr(self, "_unsolicited_text"):
+                                    self._unsolicited_text = []
+                                    self._unsolicited_tools = []
+                                self._unsolicited_text.append(block["text"])
+                            elif bt == "tool_use":
+                                if not hasattr(self, "_unsolicited_tools"):
+                                    self._unsolicited_text = []
+                                    self._unsolicited_tools = []
+                                name = block.get("name", "?")
+                                inp = block.get("input", {})
+                                self._unsolicited_tools.append(_tool_description(name, inp))
+                    elif msg_type == "result" and self.on_unsolicited:
+                        text = "".join(getattr(self, "_unsolicited_text", []))
+                        tools = getattr(self, "_unsolicited_tools", [])
+                        self._unsolicited_text = []
+                        self._unsolicited_tools = []
+                        sid = data.get("session_id")
+                        if sid:
+                            self.session_id = sid
+                        if text or tools:
+                            try:
+                                await self.on_unsolicited(text, tools)
+                            except Exception:
+                                log.exception("on_unsolicited callback error")
                     continue
 
                 if msg_type == "assistant":
@@ -311,8 +347,15 @@ class _PersistentProcess:
         try:
             self.proc.stdin.write((msg + "\n").encode("utf-8"))
             await self.proc.stdin.drain()
+            self._injections.append(prompt)  # track for drain if Claude misses it
         except Exception as e:
             log.warning(f"Failed to inject message into {self.ctx_key}: {e}")
+
+    def pop_injections(self) -> list[str]:
+        """Return and clear any messages injected during the last turn."""
+        inj = self._injections
+        self._injections = []
+        return inj
 
     @property
     def is_busy(self) -> bool:
@@ -396,8 +439,13 @@ class ClaudeBridge:
 
     async def kill_all(self):
         """Kill all persistent processes."""
-        for key in list(self._procs.keys()):
-            await self.kill_process(key)
+        keys = list(self._procs.keys())
+        if not keys:
+            return
+        await asyncio.gather(
+            *(self.kill_process(key) for key in keys),
+            return_exceptions=True,
+        )
 
     def get_process(self, ctx_key: str) -> _PersistentProcess | None:
         """Get a process if it exists and is alive."""
@@ -451,4 +499,3 @@ def _tool_description(name: str, inp: dict) -> str:
 
 
 # â”€â”€ System Monitor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-

@@ -85,8 +85,11 @@ def _start_selfbot(root: Path) -> subprocess.Popen | None:
     script = root / "selfbot" / "self.py"
     if not script.exists():
         return None
+    # selfbot uses its own venv (discord.py-self conflicts with discord.py)
+    selfbot_dir = root / "selfbot"
+    python = _venv_python(selfbot_dir) if (selfbot_dir / ".venv").exists() else _venv_python(root)
     return _start_bot(
-        [_venv_python(root), str(script)], str(root),
+        [python, str(script)], str(root),
     )
 
 

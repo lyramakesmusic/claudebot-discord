@@ -42,7 +42,7 @@ selfbot/nul
 # Reference repos
 reference/
 
-# Archives
+# Archives / snapshots
 *.zip
 
 # Experiments / external

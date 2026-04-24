@@ -5,7 +5,7 @@ claude selfbot — portable personal Claude Code assistant
 Monitors your own messages for @claude triggers, grabs recent context,
 runs through Claude Code, and responds as you with > prefix.
 
-Uses a modified discord.py that supports user tokens.
+Uses discord.py-self (installed in selfbot/.venv) for user token support.
 """
 
 import os
@@ -17,6 +17,7 @@ import subprocess
 import logging
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 import aiohttp
 
@@ -25,10 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from shared.lockfile import acquire_or_exit
 acquire_or_exit("selfbot")
 
-# Add the modified discord.py package to the import path
 SELFBOT_DIR = Path(__file__).parent
-PACKAGE_DIR = SELFBOT_DIR.parent / "selfbot discordpy package"
-sys.path.insert(0, str(PACKAGE_DIR))
 
 import discord
 from dotenv import load_dotenv
@@ -169,7 +167,7 @@ def _format_memories_for_prompt() -> str:
 
 REMINDERS_FILE = SELFBOT_DIR / "reminders.json"
 REMINDER_ACTION_RE = re.compile(r"```reminder\s*\n(.*?)\n```", re.DOTALL)
-PST = timezone(timedelta(hours=-8))
+PST = ZoneInfo("America/Los_Angeles")
 OWNER_ID = 891221733326090250
 
 
@@ -389,7 +387,8 @@ def lock_for(key: str) -> asyncio.Lock:
 async def run_claude(prompt: str, cwd: str, session_id: str = None) -> dict:
     """Run a prompt through Claude Code. Returns dict with text, session_id, error."""
     cmd = [
-        CLAUDE_CMD, "-p", prompt,
+        CLAUDE_CMD, "-p",
+        "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--verbose",
         "--dangerously-skip-permissions",
@@ -402,6 +401,7 @@ async def run_claude(prompt: str, cwd: str, session_id: str = None) -> dict:
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
     proc = await asyncio.create_subprocess_exec(
         *cmd,
+        stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
@@ -409,6 +409,12 @@ async def run_claude(prompt: str, cwd: str, session_id: str = None) -> dict:
         limit=1024 * 1024,  # 1MB line buffer (default 64KB too small for large responses)
         env=env,
     )
+
+    # Send prompt via stdin (avoids Windows command-line length limit)
+    msg = json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n"
+    proc.stdin.write(msg.encode("utf-8"))
+    await proc.stdin.drain()
+    proc.stdin.close()  # signal end of input so Claude Code starts processing
 
     text = ""
     last_text_snapshot = ""
@@ -681,6 +687,12 @@ async def on_message(message: discord.Message):
     if not prompt_text:
         return
 
+    # ── Reload command ──
+    if prompt_text.lower() == "reload":
+        log.info("Reload requested, exiting (supervisor will restart)")
+        await message.add_reaction("\u2705")  # ✅
+        os._exit(120)  # hard exit with reload code, kills subprocesses too
+
     channel = message.channel
     channel_id = channel.id
     ctx_key = str(channel_id)
@@ -793,16 +805,22 @@ async def on_message(message: discord.Message):
         f"delegate blocks are stripped before sending — the user never sees them."
     )
 
+    # ── Timestamp (same format as main bot) ──
+    t = datetime.now(ZoneInfo("America/Los_Angeles"))
+    ts = f"{t.strftime('%a')} {t.month}/{t.day}/{t.strftime('%y')} {t.hour % 12 or 12}:{t.strftime('%M')} {'pm' if t.hour >= 12 else 'am'}"
+
     if context_lines:
         context_block = "\n".join(context_lines)
         full_prompt = (
             f"{system_block}\n\n"
             f"Recent conversation:\n{context_block}\n\n"
+            f"[{ts}]\n\n"
             f"{username}: {prompt_text}"
         )
     else:
         full_prompt = (
             f"{system_block}\n\n"
+            f"[{ts}]\n\n"
             f"{username}: {prompt_text}"
         )
 

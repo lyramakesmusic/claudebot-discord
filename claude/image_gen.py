@@ -161,15 +161,23 @@ async def bg_generate_image(
                 msg = f"{msg}\n-# Cost: ${cost:.4f}".strip() if msg else f"-# Cost: ${cost:.4f}"
             await channel.send(msg or None, file=f)
             _log.info(f"BG image delivered: {filepath}")
-            # Notify Claude Code so it can see the result
+            # Notify Claude Code so it can see and react to the result
             if filepath and ctx_key and bridge:
                 pp = bridge.get_process(ctx_key)
                 if pp and pp._alive:
                     notify = (
                         f"[Image generated — saved at {filepath}. "
-                        f"You can Read it to see what was generated.]"
+                        f"Read it to see what was generated and comment on it.]"
                     )
-                    await pp.send(notify)
+                    try:
+                        result = await pp.send(notify)
+                        text = result.get("text", "").strip()
+                        if text:
+                            from shared.discord_utils import split_message, sanitize
+                            for chunk in split_message(sanitize(text)):
+                                await channel.send(chunk)
+                    except Exception as e:
+                        _log.warning(f"Failed to get Claude's reaction to image: {e}")
     except Exception:
         _log.exception("Background image generation error")
         try:

@@ -187,7 +187,7 @@ _last_msg_time: dict[str, float] = {}       # ctx_key -> epoch of last user mess
 
 # ── Per-context processing lock (covers send + post-processing) ─────────────
 _ctx_processing: set[str] = set()           # ctx_keys currently being handled
-_ctx_pending: dict[str, str] = {}           # ctx_key -> queued user_msg to send next turn
+_ctx_pending: dict[str, list[str]] = {}     # ctx_key -> queued user_msgs to send next turn
 
 # Council: GPT conversation history per thread (channel_id -> list of messages)
 # Capped to prevent unbounded memory growth.
@@ -477,6 +477,28 @@ async def on_voice_state_update(member: discord.Member,
         await voice_manager.on_voice_state_update(member, before, after)
 
 
+async def _force_reload_exit(message: discord.Message | None = None):
+    """Restart this bot process quickly and predictably.
+
+    `client.close()` can hang for a long time during reconnect/disconnect churn.
+    Bound it so supervisor sees the exit promptly and can relaunch us.
+    """
+    if message is not None:
+        try:
+            await message.add_reaction("\u2705")
+        except Exception:
+            pass
+    await bridge.kill_all()
+    try:
+        await asyncio.wait_for(client.close(), timeout=3)
+    except asyncio.TimeoutError:
+        log.warning("client.close() timed out during reload; forcing exit")
+    except Exception:
+        log.exception("client.close() failed during reload")
+    await asyncio.sleep(0.25)
+    os._exit(0)
+
+
 async def _run_bridge_task(
     pp, ctx_key, channel, message, user_msg, prefix,
     session_id, cwd, label, sys_prompt, is_orchestrator,
@@ -532,10 +554,14 @@ async def _run_bridge_task(
         # flush any intermediate text Claude wrote before this tool call
         await _flush_unsent_text()
         # send tool status as its own message
+        if not desc or not desc.strip():
+            log.warning(f"Empty tool desc, skipping send")
+            return
         try:
             await channel.send(desc)
+            log.info(f"tool sent: {desc}")
         except Exception as e:
-            log.warning(f"Failed to send tool status: {e}")
+            log.warning(f"Failed to send tool status '{desc}': {e}")
 
     try:
         result = await pp.send(
@@ -716,7 +742,7 @@ async def _run_bridge_task(
             log.info(f"[actions] Error feedback round {_feedback_round}: {feedback}")
             error_results = []
 
-            fb_result = await pp.send(feedback)
+            fb_result = await pp.send(feedback, on_tool=on_tool)
             if not fb_result or fb_result.get("error"):
                 break
             fb_text = fb_result.get("text", "")
@@ -770,7 +796,7 @@ async def _run_bridge_task(
 
             # loop: feed back → get response → execute actions → repeat
             for _council_round in range(10):  # safety cap
-                council_result = await pp.send(council_msg)
+                council_result = await pp.send(council_msg, on_tool=on_tool)
                 if not council_result or council_result.get("error"):
                     break
                 c_text = council_result.get("text", "")
@@ -865,12 +891,7 @@ async def _run_bridge_task(
     # ── Reload if requested by bot_action ──────────────────────
     if pending_reload:
         log.info("bot_action reload — restarting")
-        try:
-            await message.add_reaction("\u2705")
-        except Exception:
-            pass
-        await bridge.kill_all()
-        await client.close()
+        await _force_reload_exit(message)
         return
 
     # ── Notify if self-modified (reload is manual) ───────────
@@ -881,13 +902,21 @@ async def _run_bridge_task(
         except Exception:
             pass
 
-    # ── Drain pending message (arrived during post-processing) ──
-    pending_msg = _ctx_pending.pop(ctx_key, None)
-    if pending_msg and pp.alive:
-        log.info(f"Draining pending message for {ctx_key}: {pending_msg[:80]}")
-        _ctx_processing.add(ctx_key)
+    # ── Drain queued messages (arrived during post-processing) ──
+    # Note: injected messages (from pp.is_busy branch) are NOT drained here —
+    # Claude reads them mid-turn via the stdin stream and responds inline.
+    # Draining them would produce a redundant "already addressed" response.
+    # We still clear pp's injection list so it doesn't grow unboundedly.
+    pp.pop_injections()
+    pending_msgs = _ctx_pending.pop(ctx_key, [])
+
+    if pending_msgs and pp.alive:
+        combined = "\n\n".join(pending_msgs)
+        log.info(f"Draining {len(pending_msgs)} pending message(s) for {ctx_key}: {combined[:80]}")
+        # NOTE: no _ctx_processing here — pp.is_busy (send_lock) handles concurrency.
+        # New messages during drain will inject normally via the pp.is_busy path.
         try:
-            drain_result = await pp.send(pending_msg)
+            drain_result = await pp.send(combined, on_tool=on_tool)
             if drain_result and not drain_result.get("error"):
                 drain_text = drain_result.get("text", "")
                 if drain_text:
@@ -907,9 +936,10 @@ async def _run_bridge_task(
                             except Exception:
                                 pass
         except Exception:
-            log.exception(f"Error draining pending message for {ctx_key}")
-        finally:
-            _ctx_processing.discard(ctx_key)
+            log.exception(f"Error draining pending messages for {ctx_key}")
+
+    # Background tasks: no polling monitor. Task notifications show up naturally
+    # when the next user message triggers a turn, just like regular Claude Code.
 
 
 @client.event
@@ -1101,11 +1131,7 @@ async def on_message(message: discord.Message):
         except Exception as e:
             await message.reply(f"Reload validation failed: {e}", mention_author=False)
             return
-        await message.add_reaction("\u2705")
-        await bridge.kill_all()
-        await client.close()
-        await asyncio.sleep(1)
-        os._exit(0)
+        await _force_reload_exit(message)
         return
 
     # ── Context switching commands ────────────────────────────
@@ -1190,9 +1216,9 @@ async def on_message(message: discord.Message):
         user_msg = f"{username}: {prompt_text}"
 
     # ── Prepend timestamp to every message ──
-    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-    _pdt = _tz(_td(hours=-7))  # PDT
-    t = _dt.now(_pdt)
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZI
+    t = _dt.now(_ZI("America/Los_Angeles"))
     ts = f"{t.strftime('%a')} {t.month}/{t.day}/{t.strftime('%y')} {t.hour % 12 or 12}:{t.strftime('%M')} {'pm' if t.hour >= 12 else 'am'}"
     user_msg = f"[{ts}]\n\n{user_msg}"
 
@@ -1229,6 +1255,26 @@ async def on_message(message: discord.Message):
             sys_prompt = f"{sys_prompt}\n\n" + "\n\n".join(plugin_sections)
     pp = await bridge.get_or_create(ctx_key, cwd, session_id, sys_prompt)
 
+    # ── Set up unsolicited response handler (background task completions) ──
+    if not pp.on_unsolicited:
+        async def _on_unsolicited(text: str, tools: list[str]):
+            """Handle Claude's autonomous responses between turns (e.g. task completions)."""
+            log.info(f"Unsolicited response for {ctx_key}: text_len={len(text)} tools={len(tools)}")
+            for tool_desc in tools:
+                try:
+                    await channel.send(tool_desc)
+                except Exception:
+                    pass
+            if text.strip():
+                cleaned, _ = extract_bot_actions_module(text)
+                if cleaned.strip():
+                    for chunk in split_message(sanitize(cleaned.strip())):
+                        try:
+                            await channel.send(chunk)
+                        except Exception:
+                            pass
+        pp.on_unsolicited = _on_unsolicited
+
     # ── If Claude is busy, inject + interrupt so it reads immediately ──
     if pp.is_busy:
         log.info(f"Injecting mid-turn message into {ctx_key}: {user_msg[:80]}")
@@ -1240,7 +1286,7 @@ async def on_message(message: discord.Message):
     # ── If we're still post-processing (sending text/actions), queue for next turn ──
     if ctx_key in _ctx_processing:
         log.info(f"Post-processing in progress for {ctx_key}, queuing: {user_msg[:80]}")
-        _ctx_pending[ctx_key] = user_msg  # latest message wins (overwrites previous)
+        _ctx_pending.setdefault(ctx_key, []).append(user_msg)
         cleanup_message_attachments(att_paths)
         return
 
@@ -1292,5 +1338,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

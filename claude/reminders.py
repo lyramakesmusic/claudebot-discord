@@ -7,9 +7,10 @@ import subprocess
 import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 REMINDER_ACTION_RE = re.compile(r"```reminder\s*\n(.*?)\n```", re.DOTALL)
-PST = timezone(timedelta(hours=-8))
+PST = ZoneInfo("America/Los_Angeles")
 
 _log = logging.getLogger(__name__)
 _reminders_file = Path("selfbot/reminders.json")

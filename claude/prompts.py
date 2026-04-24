@@ -2,10 +2,11 @@
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 _bot_file = "bot.py"
 _codex_bot_user_id = ""
-_pst = timezone(timedelta(hours=-8))
+_pst = ZoneInfo("America/Los_Angeles")
 _format_memories_for_prompt_fn = lambda guild_id=None: "(no memories saved yet)"
 _format_reminders_for_prompt_fn = lambda: "(no pending reminders)"
 
@@ -262,7 +263,7 @@ The user's waking hours are ~2:00 PM to ~3:00 AM _pst. Schedule reminders within
 IMPORTANT: The user often stays up past midnight. "Tomorrow" at 2 AM means the NEXT afternoon
 (same calendar day), NOT +24 hours. Their "day" doesn't reset until they sleep (~3 AM).
 For example, at 2 AM on Feb 1, "remind me tomorrow" = Feb 1 ~3 PM, NOT Feb 2.
-All times should be in _pst (America/Los_Angeles, UTC-8).
+All times should be in Pacific time (America/Los_Angeles). Use the current UTC offset shown above.
 
 Pending reminders:
 {reminders_block}
@@ -275,7 +276,7 @@ To set a reminder, include a ```reminder``` block:
   {{"action": "cancel", "id": 3}}
   ```
 
-The "time" field MUST be an ISO 8601 timestamp with timezone offset (e.g. -08:00 for _pst).
+The "time" field MUST be an ISO 8601 timestamp with timezone offset (e.g. -07:00 for PDT, -08:00 for PST).
 When a reminder fires, it sends a Discord ping AND a Windows desktop notification.
 reminder blocks are stripped before sending â€" the user never sees them.
 
