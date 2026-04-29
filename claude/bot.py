@@ -189,6 +189,12 @@ _last_msg_time: dict[str, float] = {}       # ctx_key -> epoch of last user mess
 _ctx_processing: set[str] = set()           # ctx_keys currently being handled
 _ctx_pending: dict[str, list[str]] = {}     # ctx_key -> queued user_msgs to send next turn
 
+# Guilds where the bot runs with full trust (no safety notes, full metadata)
+_TRUSTED_GUILDS = {
+    1061615370068303902,   # lyra's server (primary)
+    1468279688630636688,   # hehe
+}
+
 # Council: GPT conversation history per thread (channel_id -> list of messages)
 # Capped to prevent unbounded memory growth.
 _council_gpt_history: dict[int, list[dict]] = {}
@@ -863,7 +869,7 @@ async def _run_bridge_task(
             oldest = list(_last_token_usage.keys())[:-100]
             for k in oldest:
                 del _last_token_usage[k]
-        if ctx_pct is not None:
+        if ctx_pct is not None and guild_id in _TRUSTED_GUILDS:
             cache_hit = round((result.get("cache_read_tokens", 0) / total_tokens) * 100) if total_tokens else 0
             # format turn runtime
             elapsed = time.time() - _turn_start
@@ -1221,6 +1227,15 @@ async def on_message(message: discord.Message):
     t = _dt.now(_ZI("America/Los_Angeles"))
     ts = f"{t.strftime('%a')} {t.month}/{t.day}/{t.strftime('%y')} {t.hour % 12 or 12}:{t.strftime('%M')} {'pm' if t.hour >= 12 else 'am'}"
     user_msg = f"[{ts}]\n\n{user_msg}"
+
+    # ── Safety note for non-owner users in untrusted guilds ──
+    if guild_id not in _TRUSTED_GUILDS and message.author.id != OWNER_ID:
+        user_msg += (
+            "\n\n[Note: This is not Lyra. You are running on Lyra's personal desktop. "
+            "Be cautious — avoid accessing sensitive files, running destructive commands, "
+            "SSH, or anything that could affect her system. Stick to safe, read-only, "
+            "sandboxed operations unless you're confident it's harmless.]"
+        )
 
     # ── Build system prompt (used at process creation) ───────
     if is_orchestrator:
