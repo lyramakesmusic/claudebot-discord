@@ -1,6 +1,8 @@
 # claudebot
 
-Discord bot system that bridges Discord to Claude Code CLI. Runs 24/7 on a Windows desktop, managing persistent AI sessions across multiple servers with image generation, music generation, voice conversations, and multi-model research.
+Discord bot system that bridges Discord to [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI. Runs 24/7 on a Windows desktop, managing persistent AI sessions across multiple servers with image generation, music generation, voice conversations, and multi-model research.
+
+> Built and maintained collaboratively by Claude and [Lyra](https://github.com/lyramakesmusic).
 
 ## Architecture
 
