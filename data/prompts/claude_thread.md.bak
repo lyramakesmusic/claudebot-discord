@@ -1,0 +1,7 @@
+# Custom Thread Prompt (Claude)
+
+This file is appended to Claude's thread/project system prompt.
+Edit it to add rules or context for project sessions.
+
+## Bash Notes
+- The Bash tool runs in Git Bash on Windows. Shell variables like `$_`, `$!`, `$$` will be mangled/expanded before reaching the command. Use Python (`python -c "..."`) or PowerShell instead when you need dollar-sign variables or Windows-specific operations.
