@@ -10,7 +10,6 @@ Scheduled Task (Windows logon)
     -> supervisor.py (restarts bots if they exit)
       -> claude bot     (Discord bot token, Claude Code CLI backend)
       -> codex bot      (Discord bot token, Codex CLI backend)
-      -> selfbot        (Discord user token, Claude Code CLI backend)
 ```
 
 Each bot connects to Discord independently. The Claude bot spawns **persistent Claude Code CLI processes** per conversation context (channel or thread), communicating via `--input-format stream-json --output-format stream-json` over stdin/stdout. Sessions survive across messages — Claude Code maintains its own conversation history internally, and the bot resumes sessions by ID.
@@ -39,9 +38,6 @@ claudebot/
 │   ├── attachments.py               # Discord attachment download + PDF extraction
 │   └── contexts.py                  # Context/session switching
 ├── codex/                           # Codex bot (similar structure, uses codex CLI)
-├── selfbot/                         # User token bot (.claude prefix commands)
-│   ├── self.py                      # Monitors own messages for .claude trigger
-│   └── .venv/                       # Separate venv (discord.py-self, not discord.py)
 ├── shared/                          # Cross-bot utilities
 │   ├── state.py                     # BotState: sessions, projects, guilds (JSON)
 │   ├── plugin.py / plugin_loader.py # Plugin interface + discovery
@@ -57,7 +53,7 @@ claudebot/
 │   └── health.py                    # Heartbeat writer
 ├── integrations/                    # External service integrations
 │   ├── suno.py                      # Suno AI music generation
-│   ├── midjourney.py                # Midjourney via selfbot slash commands
+│   ├── midjourney.py                # Midjourney image generation
 │   ├── council.py                   # GPT-5 critic + Gemini researcher (OpenRouter)
 │   └── voice/                       # Real-time voice conversations
 │       ├── manager.py               # VoiceManager (Discord VC lifecycle)
@@ -218,7 +214,7 @@ These are extracted by regex (`shared/bot_actions.py`), stripped from the displa
 | Action | Plugin | What it does |
 |--------|--------|-------------|
 | `generate_image` | image_gen | Gemini image via OpenRouter |
-| `generate_midjourney` | midjourney | MJ via selfbot `/imagine` slash command |
+| `generate_midjourney` | midjourney | Midjourney image generation |
 | `generate_music` | suno | Suno AI music generation |
 | `upload` | upload | Post file to Discord channel |
 | `create_project` | project_mgmt | Create thread + folder + session |
@@ -252,10 +248,6 @@ The custom thread prompt lives at `data/prompts/claude_thread.md`. Claude can ed
 - Lockfiles (`data/*.lock`) prevent duplicate instances
 - Heartbeat written to `data/supervisor_heartbeat.json` every second
 - `run.py` wraps the supervisor itself — if supervisor crashes, run.py restarts it
-
-### Selfbot venv
-
-The selfbot uses `discord.py-self` (user token support) which conflicts with regular `discord.py`. It has its own venv at `selfbot/.venv/`. The supervisor detects this and uses the selfbot's Python instead of the main venv's.
 
 ## Multi-Guild Support
 
@@ -328,7 +320,6 @@ DISCORD_TOKEN=your_claude_bot_token
 BOT_USER_ID=your_bot_user_id
 CODEX_DISCORD_TOKEN=your_codex_bot_token      # optional
 CODEX_BOT_USER_ID=codex_bot_user_id           # optional
-SELFBOT_TOKEN=your_discord_user_token          # optional, for selfbot
 
 # Claude Code — required
 CLAUDE_CMD=claude                              # or full path to claude.exe
@@ -362,12 +353,6 @@ cd claudebot
 # Create venv and install dependencies
 uv venv
 uv pip install -e .
-
-# Selfbot venv (if using selfbot)
-cd selfbot
-python -m venv .venv
-.venv\Scripts\pip install discord.py-self python-dotenv openai httpx
-cd ..
 
 # Copy and edit .env
 cp .env.example .env  # fill in tokens
@@ -431,7 +416,7 @@ The custom thread prompt at `data/prompts/claude_thread.md` is appended to every
 
 **Gemini** (via OpenRouter): fast (~10s), precise, good with text. Use for diagrams, memes, reference edits.
 
-**Midjourney** (via selfbot slash commands): artistic, stylized, 1-3 min. Returns 4 images. The bot sends `/imagine` through the selfbot's user token to a Midjourney-enabled channel, polls for the result, splits the grid into quadrants, and posts them.
+**Midjourney**: artistic, stylized, 1-3 min. Returns 4 images split from the generation grid.
 
 Both loop results back to Claude so it can see and comment on what was generated.
 
