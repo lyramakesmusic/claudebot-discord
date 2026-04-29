@@ -25,19 +25,11 @@ codexbot.log
 __pycache__/
 *.pyc
 
+# Node
+node_modules/
+
 # Models (large binaries)
 models/
-
-# Selfbot state
-selfbot/sessions.json
-selfbot/sessions.tmp
-selfbot/memories.json
-selfbot/memories*.json
-selfbot/memories.tmp
-selfbot/reminders.json
-selfbot/reminders.tmp
-selfbot discordpy package/
-selfbot/nul
 
 # Reference repos
 reference/
