@@ -300,16 +300,27 @@ on the next new process (new session or after restart/reload).
 {custom_prompt}""")
 
 
-def build_thread_context() -> str:
+def build_thread_context(project_name: str = "", project_cwd: str = "",
+                         channel_name: str = "", server_name: str = "") -> str:
     """Minimal system context for thread/project sessions.
     Gives them upload + reload capabilities without orchestrator-specific stuff."""
     bot_file = str(_bot_file)
     custom_prompt_path = str(_PROMPTS_DIR / "claude_thread.md")
     _custom = _load_custom_prompt("claude_thread.md")
     custom_prompt = f"\n\n== USER-DEFINED ADDITIONS ==\n{_custom}" if _custom else ""
+
+    # Project context header
+    project_header = ""
+    if project_name or project_cwd:
+        project_header = f"""You are working on project "{project_name or 'unnamed'}" in {project_cwd or 'default directory'}
+Your CWD is set to the path above, this is your home now for this project <3
+""" + "\n"
+
     return _fill_dynamic(f"""[SYSTEM CONTEXT - claudebot project thread]
 You are running as a project-specific Claude Code session inside a Discord thread.
 You have full Claude Code capabilities (read/write files, run commands, etc.).
+
+{project_header}
 
 == FILE UPLOAD ==
 To upload a file to the current Discord channel:
