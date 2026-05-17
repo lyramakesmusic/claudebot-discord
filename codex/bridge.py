@@ -1,4 +1,4 @@
-"""Codex app-server bridge (no Discord dependencies)."""
+"""Codex app-server bridge (WebSocket transport)."""
 
 import asyncio
 import json
@@ -7,10 +7,13 @@ import re
 import subprocess
 from pathlib import Path
 
+import websockets
+
 CODEX_CMD = ""
 CODEX_MODEL = ""
 DOCUMENTS_DIR = Path.home() / "Documents"
 CREATE_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+WS_PORT = 19876  # localhost WebSocket port for app-server
 state = None
 log = None
 
@@ -64,6 +67,7 @@ class CodexAppServer:
 
     def __init__(self):
         self.proc: asyncio.subprocess.Process | None = None
+        self.ws: websockets.WebSocketClientProtocol | None = None
         self._alive = False
         self._req_id = 0
         self._pending: dict[int | str, asyncio.Future] = {}  # id -> future for responses
@@ -86,8 +90,8 @@ class CodexAppServer:
         return any(n in msg for n in needles)
 
     async def start(self):
-        """Spawn the codex app-server process."""
-        cmd = [CODEX_CMD, "app-server"]
+        """Spawn the codex app-server with WebSocket transport and connect."""
+        cmd = [CODEX_CMD, "app-server", "--listen", f"ws://127.0.0.1:{WS_PORT}"]
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
         self.proc = await asyncio.create_subprocess_exec(
@@ -97,12 +101,32 @@ class CodexAppServer:
             stderr=asyncio.subprocess.PIPE,
             cwd=str(DOCUMENTS_DIR),
             creationflags=CREATE_FLAGS,
-            limit=4 * 1024 * 1024,
             env=env,
+        )
+        log.info(f"Codex app-server started (pid={self.proc.pid}), connecting WebSocket...")
+
+        # Wait for the server to be ready (poll health endpoint)
+        import aiohttp
+        for attempt in range(30):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"http://127.0.0.1:{WS_PORT}/readyz", timeout=aiohttp.ClientTimeout(total=1)) as resp:
+                        if resp.status == 200:
+                            break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        else:
+            raise RuntimeError("Codex app-server failed to start within 15s")
+
+        # Connect WebSocket
+        self.ws = await websockets.connect(
+            f"ws://127.0.0.1:{WS_PORT}",
+            max_size=None,  # no message size limit — fixes the buffer overflow
         )
         self._alive = True
         self._reader_task = asyncio.create_task(self._read_loop())
-        log.info(f"Codex app-server started (pid={self.proc.pid})")
+        log.info(f"Codex WebSocket connected")
 
         # Initialize handshake
         resp = await self._request("initialize", {
@@ -112,13 +136,11 @@ class CodexAppServer:
         await self._notify("initialized")
 
     async def _write(self, msg: dict):
-        """Write a JSON-RPC message to stdin."""
-        if not self.proc or not self.proc.stdin:
-            raise RuntimeError("App-server not running")
-        line = json.dumps(msg) + "\n"
+        """Send a JSON-RPC message over WebSocket."""
+        if not self.ws:
+            raise RuntimeError("App-server not connected")
         async with self._write_lock:
-            self.proc.stdin.write(line.encode("utf-8"))
-            await self.proc.stdin.drain()
+            await self.ws.send(json.dumps(msg))
 
     async def _request(self, method: str, params: dict, timeout: float = 30) -> dict:
         """Send a JSON-RPC request and wait for the response."""
@@ -144,18 +166,14 @@ class CodexAppServer:
         await self._write({"jsonrpc": "2.0", "id": req_id, "result": result})
 
     async def _read_loop(self):
-        """Background reader: dispatch JSON-RPC messages from stdout."""
+        """Background reader: dispatch JSON-RPC messages from WebSocket."""
         try:
-            while self._alive and self.proc and self.proc.returncode is None:
-                raw = await self.proc.stdout.readline()
-                if not raw:
+            async for raw in self.ws:
+                if not self._alive:
                     break
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
                 try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
+                    msg = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
                     continue
 
                 # Response to our request
@@ -191,6 +209,8 @@ class CodexAppServer:
 
         except asyncio.CancelledError:
             pass
+        except websockets.exceptions.ConnectionClosed:
+            log.warning("App-server WebSocket connection closed")
         except Exception:
             log.exception("App-server read loop error")
         finally:
@@ -539,10 +559,16 @@ class CodexAppServer:
                 log.warning(f"Interrupt failed: {e}")
 
     async def kill(self):
-        """Kill the app-server process."""
+        """Kill the app-server process and close WebSocket."""
         self._alive = False
         if self._reader_task:
             self._reader_task.cancel()
+        if self.ws:
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
         if self.proc and self.proc.returncode is None:
             try:
                 self.proc.kill()

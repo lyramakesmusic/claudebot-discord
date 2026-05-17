@@ -520,13 +520,19 @@ async def _run_bridge_task(
     async def _keep_typing():
         try:
             while True:
-                await channel.typing()
+                try:
+                    await channel.typing()
+                except discord.HTTPException:
+                    pass
                 await asyncio.sleep(TYPING_INTERVAL)
         except asyncio.CancelledError:
             pass
 
     typing_task = asyncio.create_task(_keep_typing())
-    await channel.typing()
+    try:
+        await channel.typing()
+    except discord.HTTPException:
+        pass
 
     _turn_start = time.time()
     current_text = ""   # latest accumulated text from Claude
@@ -1120,6 +1126,26 @@ async def on_message(message: discord.Message):
             await message.reply(f"Compact failed: {e}", mention_author=False)
         return
 
+    if _cmd.startswith(".model"):
+        parts = _cmd.split(None, 1)
+        ctx_key = _resolve_ctx_key()
+        if len(parts) < 2:
+            # Show current model
+            override = state.get_model_override(ctx_key)
+            pp = bridge.get_process(ctx_key)
+            current = override or (pp.model if pp else "") or CLAUDE_MODEL or "(default from ~/.claude/settings.json)"
+            await message.reply(f"Model: `{current}`" + (" (override)" if override else ""), mention_author=False)
+            return
+        new_model = parts[1].strip()
+        # Kill existing process so it respawns with new model
+        pp = bridge.get_process(ctx_key)
+        if pp:
+            await pp.kill()
+        # Persist model override so it survives reload
+        state.set_model_override(ctx_key, new_model)
+        await message.reply(f"Model switched to `{new_model}`", mention_author=False)
+        return
+
     if _cmd == "reload":
         log.info("Manual reload requested — validating syntax")
         # validate bot.py syntax before reloading
@@ -1255,7 +1281,12 @@ async def on_message(message: discord.Message):
         if is_council:
             sys_prompt = build_opus_council_prompt()
         else:
-            sys_prompt = build_thread_context_module()
+            sys_prompt = build_thread_context_module(
+                project_name=label or "",
+                project_cwd=cwd,
+                channel_name=getattr(channel, "name", ""),
+                server_name=guild.name if guild else "",
+            )
 
     # ── Get or create persistent process ─────────────────────
     if _plugin_mgr is not None:
@@ -1268,7 +1299,8 @@ async def on_message(message: discord.Message):
         )
         if plugin_sections:
             sys_prompt = f"{sys_prompt}\n\n" + "\n\n".join(plugin_sections)
-    pp = await bridge.get_or_create(ctx_key, cwd, session_id, sys_prompt)
+    model_override = state.get_model_override(ctx_key)
+    pp = await bridge.get_or_create(ctx_key, cwd, session_id, sys_prompt, model=model_override)
 
     # ── Set up unsolicited response handler (background task completions) ──
     if not pp.on_unsolicited:
