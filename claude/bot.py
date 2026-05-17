@@ -1185,9 +1185,11 @@ async def on_message(message: discord.Message):
                 if hist_msg.author == client.user:
                     break  # stop at our last message
                 msg_text = (hist_msg.content or "").strip()
-                if msg_text:
+                att_texts = [f"[attachment: {a.filename}]" for a in hist_msg.attachments] if hist_msg.attachments else []
+                combined = msg_text + ("\n" + " ".join(att_texts) if att_texts else "")
+                if combined.strip():
                     author = hist_msg.author.display_name or hist_msg.author.name
-                    recent.append(f"[{author}]\n{msg_text}")
+                    recent.append(f"[{author}]\n{combined.strip()}")
                 if len(recent) >= 15:
                     break
             if recent:
