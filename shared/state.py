@@ -157,6 +157,13 @@ class BotState:
             return {n: p for n, p in projects.items() if p.get("guild_id") == guild_id}
         return dict(projects)
 
+    def get_model_override(self, ctx_key: str) -> str:
+        return self._data.get("model_overrides", {}).get(ctx_key, "")
+
+    def set_model_override(self, ctx_key: str, model: str):
+        self._data.setdefault("model_overrides", {})[ctx_key] = model
+        self._save()
+
     def get_guild_config(self, guild_id: int) -> Optional[dict]:
         return self._data.get("guilds", {}).get(str(guild_id))
 

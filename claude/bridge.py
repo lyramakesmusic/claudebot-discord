@@ -484,7 +484,7 @@ def _tool_description(name: str, inp: dict) -> str:
     desc = name
     if name in ("Read", "Edit", "Write") and "file_path" in inp:
         desc += f"({Path(inp['file_path']).name})"
-    elif name == "Bash" and "command" in inp:
+    elif name in ("Bash", "PowerShell") and "command" in inp:
         cmd_str = inp["command"][:50].replace("\n", " ")
         desc += f"(`{cmd_str}`)"
     elif name in ("Glob", "Grep") and "pattern" in inp:
@@ -495,6 +495,13 @@ def _tool_description(name: str, inp: dict) -> str:
         desc += f"(`{inp['query'][:60]}`)"
     elif name == "WebFetch" and "url" in inp:
         desc += f"(`{inp['url'][:80]}`)"
+    elif name == "Agent" and "prompt" in inp:
+        agent_type = inp.get("subagent_type", "")
+        agent_desc = inp.get("description", inp["prompt"][:40])
+        if agent_type == "codex":
+            desc = f"Codex({agent_desc})"
+        else:
+            desc += f"({agent_desc})"
     return desc
 
 
