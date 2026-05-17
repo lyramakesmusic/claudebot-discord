@@ -1178,17 +1178,17 @@ async def on_message(message: discord.Message):
     # Fetch recent messages since our last message (up to 5) so Claude
     # can see e.g. codex's diagnostics without copy-pasting.
     prev_context = None
-    if mentioned:
+    if True:  # always fetch recent context
         try:
             recent: list[str] = []
-            async for hist_msg in channel.history(limit=20, before=message):
+            async for hist_msg in channel.history(limit=50, before=message):
                 if hist_msg.author == client.user:
                     break  # stop at our last message
                 msg_text = (hist_msg.content or "").strip()
                 if msg_text:
                     author = hist_msg.author.display_name or hist_msg.author.name
                     recent.append(f"[{author}]\n{msg_text}")
-                if len(recent) >= 5:
+                if len(recent) >= 15:
                     break
             if recent:
                 recent.reverse()  # chronological order
