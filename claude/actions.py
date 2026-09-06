@@ -146,17 +146,14 @@ async def execute_bot_actions(
 
         elif action == "full_restart":
             # nuclear option: kill supervisor + all bots, relaunch from scratch
-            restart_script = PROJECT_ROOT / "scripts" / "restart.ps1"
+            from shared.restart import restart_script_path, launch_full_restart
+            restart_script = restart_script_path(PROJECT_ROOT)
             if not restart_script.exists():
-                results.append("restart.ps1 not found")
+                results.append(f"{restart_script.name} not found")
                 continue
             try:
                 await channel.send("Full restart in progress...")
-                subprocess.Popen(
-                    ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(restart_script)],
-                    creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
-                    close_fds=True,
-                )
+                launch_full_restart(PROJECT_ROOT)
                 # we'll be dead in a moment
                 await asyncio.sleep(1)
                 os._exit(0)

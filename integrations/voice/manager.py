@@ -13,6 +13,8 @@ import asyncio
 import threading
 import json
 import base64
+import subprocess
+import tempfile
 import time
 import signal
 import logging
@@ -77,6 +79,14 @@ VOICE_DESCRIPTIONS: dict[str, str] = {
     "watts": "alan watts philosopher",
     "soft": "gentle soft voice",
     "atc": "air traffic controller",
+    "sam": "windows robot voice",
+    "david": "windows david voice",
+    "zira": "windows zira voice",
+}
+SAPI_VOICE_REGISTRY: dict[str, str] = {
+    "sam": "Microsoft David",
+    "david": "Microsoft David",
+    "zira": "Microsoft Zira",
 }
 
 # STT
@@ -95,11 +105,29 @@ VOICE_CHANNEL_IDS = [
 VOICE_ALLOWED_USER_IDS = [
     int(x) for x in os.getenv("VOICE_ALLOWED_USER_IDS", "").split(",") if x.strip()
 ]
+VOICE_ALLOW_BOT_AUDIO = os.getenv("VOICE_ALLOW_BOT_AUDIO", "0").lower() in ("1", "true", "yes", "on")
+VOICE_ALLOWED_BOT_USER_IDS = {
+    int(x) for x in (
+        os.getenv(
+            "VOICE_ALLOWED_BOT_USER_IDS",
+            ",".join(
+                x for x in (
+                    os.getenv("BOT_USER_ID", ""),
+                    os.getenv("CODEX_BOT_USER_ID", ""),
+                    os.getenv("KIMI_BOT_USER_ID", ""),
+                )
+                if x
+            ),
+        ).split(",")
+    )
+    if x.strip()
+}
 VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", DEFAULT_VOICE_ID)
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 VOICE_LLM_MODEL = os.getenv("VOICE_MODEL", "anthropic/claude-haiku-4.5")
 VOICE_MODE = os.getenv("VOICE_MODE", "claude")  # "openrouter" or "claude"
 VOICE_CLAUDE_MODEL = os.getenv("VOICE_CLAUDE_MODEL", "claude-opus-4-6")
+VOICE_TTS_BACKEND = os.getenv("VOICE_TTS_BACKEND", "sapi").lower()
 
 # ── Noise filter ──────────────────────────────────────────────────────────────
 # Adapted from Claude Avatar by Olivia (github.com/taygetea)
@@ -452,18 +480,21 @@ class MultiUserSTTManager:
     def __init__(self, on_transcript: Callable[[int, str], None] = None):
         self._sessions: dict[int, UserSTTSession | WhisperSTTSession] = {}
         self._session_lock = asyncio.Lock()
+        self._reconnect_locks: dict[int, asyncio.Lock] = {}
         self.user_names: dict[int, str] = {}
         self.on_transcript = on_transcript
         self._use_local_stt: bool = False  # fallback to Whisper
+
+    def _make_session(self, user_id: int, display_name: str) -> UserSTTSession | WhisperSTTSession:
+        if self._use_local_stt:
+            return WhisperSTTSession(user_id, display_name, on_transcript=self.on_transcript)
+        return UserSTTSession(user_id, display_name, on_transcript=self.on_transcript)
 
     async def ensure_session(self, user_id: int, display_name: str):
         async with self._session_lock:
             if user_id not in self._sessions:
                 self.user_names[user_id] = display_name
-                if self._use_local_stt:
-                    session = WhisperSTTSession(user_id, display_name, on_transcript=self.on_transcript)
-                else:
-                    session = UserSTTSession(user_id, display_name, on_transcript=self.on_transcript)
+                session = self._make_session(user_id, display_name)
                 self._sessions[user_id] = session
                 await session.start()
             return self._sessions[user_id]
@@ -490,9 +521,22 @@ class MultiUserSTTManager:
                     session._billing_logged = True
                     await self._switch_to_whisper(user_id, display_name)
                 return
-            # Avoid reconnect storm — only reconnect if not already reconnecting
-            if not getattr(session, "_reconnecting", False):
-                session._reconnecting = True
+            lock = self._reconnect_locks.setdefault(user_id, asyncio.Lock())
+            if lock.locked():
+                return
+            async with lock:
+                current = self._sessions.get(user_id)
+                if not current:
+                    return
+                if current.connected.is_set():
+                    await current.send_audio(pcm_bytes)
+                    return
+                if current.is_billing_error():
+                    if not getattr(current, "_billing_logged", False):
+                        log.warning(f"[STT] {display_name}: billing error — {current.last_close_reason}, switching to Whisper")
+                        current._billing_logged = True
+                        await self._switch_to_whisper(user_id, display_name)
+                    return
                 log.info(f"[STT] {display_name}: reconnecting...")
                 await self.reconnect_session(user_id)
 
@@ -536,7 +580,7 @@ class MultiUserSTTManager:
             if not session.connected.is_set() and not session.is_billing_error():
                 await session.stop()
                 display_name = self.user_names.get(user_id, f"User {user_id}")
-                new_session = UserSTTSession(user_id, display_name, on_transcript=self.on_transcript)
+                new_session = self._make_session(user_id, display_name)
                 self._sessions[user_id] = new_session
                 await new_session.start()
 
@@ -1163,6 +1207,108 @@ class KokoroTTS:
         await self.cancel_response()
 
 
+class SapiTTS:
+    """Windows SAPI TTS backend for low-latency Microsoft Sam-adjacent robot voice."""
+
+    def __init__(self, bridge_queue: deque, voice_name: str | None = None):
+        self.bridge_queue = bridge_queue
+        self.voice_name = voice_name or os.getenv("SAPI_VOICE", "Microsoft David")
+        self.rate = int(os.getenv("SAPI_RATE", "2"))
+        self.volume = int(os.getenv("SAPI_VOLUME", "100"))
+        self._buffer: list[str] = []
+        self._response_active = False
+        self.tts_finished = asyncio.Event()
+        self.bridge_audio_bytes = 0
+        self.audio_start_time: float | None = None
+
+    async def connect(self):
+        log.info(f"[SapiTTS] Ready (voice={self.voice_name!r}, rate={self.rate})")
+
+    def is_connected(self) -> bool:
+        return True
+
+    async def prepare_response(self):
+        self.tts_finished.clear()
+        self._buffer.clear()
+        self.bridge_audio_bytes = 0
+        self.audio_start_time = None
+        self._response_active = True
+
+    async def send_token(self, text: str):
+        if self._response_active:
+            self._buffer.append(text)
+
+    async def finish_response(self):
+        if not self._response_active:
+            self.tts_finished.set()
+            return
+        full_text = "".join(self._buffer).strip()
+        if not full_text:
+            self._response_active = False
+            self.tts_finished.set()
+            return
+        loop = asyncio.get_event_loop()
+        try:
+            pcm = await loop.run_in_executor(None, self._synthesize_to_pcm, full_text)
+            if pcm and self._response_active:
+                chunk_size = 2400
+                self.audio_start_time = time.time()
+                log.info(f"[SapiTTS] First audio chunk ({min(len(pcm), chunk_size)} bytes)")
+                for i in range(0, len(pcm), chunk_size):
+                    if not self._response_active:
+                        break
+                    chunk = pcm[i:i + chunk_size]
+                    self.bridge_audio_bytes += len(chunk)
+                    self.bridge_queue.append(chunk)
+            log.info(f"[SapiTTS] Synthesized {self.bridge_audio_bytes} bytes")
+        except Exception as e:
+            log.warning(f"[SapiTTS] Synthesis error: {e}")
+        self._response_active = False
+        self.tts_finished.set()
+
+    def _synthesize_to_pcm(self, text: str) -> bytes:
+        with tempfile.TemporaryDirectory(prefix="sapi_tts_") as tmp:
+            text_path = Path(tmp) / "text.txt"
+            wav_path = Path(tmp) / "speech.wav"
+            text_path.write_text(text, encoding="utf-8")
+            ps = rf"""
+Add-Type -AssemblyName System.Speech
+$text = Get-Content -LiteralPath '{text_path}' -Raw -Encoding UTF8
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$voiceName = '{self.voice_name}'
+$voice = $synth.GetInstalledVoices() | Where-Object {{ $_.VoiceInfo.Name -like "*$voiceName*" }} | Select-Object -First 1
+if ($voice) {{ $synth.SelectVoice($voice.VoiceInfo.Name) }}
+$synth.Rate = {self.rate}
+$synth.Volume = {self.volume}
+$synth.SetOutputToWaveFile('{wav_path}')
+$synth.Speak($text)
+$synth.Dispose()
+"""
+            subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            ff = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(wav_path),
+                 "-f", "s16le", "-ar", str(TTS_SAMPLE_RATE), "-ac", "1", "-"],
+                check=True,
+                capture_output=True,
+                timeout=30,
+            )
+            return ff.stdout
+
+    async def cancel_response(self):
+        self._response_active = False
+        self._buffer.clear()
+        self.tts_finished.set()
+
+    async def close(self):
+        await self.cancel_response()
+
+
 # ElevenLabs quota/credit error detection
 _ELEVENLABS_QUOTA_CODES = {1008, 4003, 4008}
 _ELEVENLABS_QUOTA_KEYWORDS = {"quota", "limit", "credit", "insufficient", "exceeded", "payment"}
@@ -1183,6 +1329,28 @@ def _is_elevenlabs_quota_error(exc: Exception) -> bool:
 # ── Discord audio I/O ─────────────────────────────────────────────────────────
 # Adapted from Claude Avatar by Olivia (github.com/taygetea)
 
+class WakeableAudioQueue:
+    def __init__(self, maxlen: int = 500):
+        self._deque: deque[bytes] = deque(maxlen=maxlen)
+        self._wake = None
+
+    def set_wake_callback(self, wake):
+        self._wake = wake
+
+    def append(self, item: bytes):
+        self._deque.append(item)
+        if self._wake:
+            self._wake()
+
+    def popleft(self) -> bytes:
+        return self._deque.popleft()
+
+    def clear(self):
+        self._deque.clear()
+
+    def __len__(self) -> int:
+        return len(self._deque)
+
 class VoiceEngineSink(voice_recv.AudioSink):
     """Receives per-packet Discord audio and forwards to the voice manager."""
 
@@ -1200,10 +1368,20 @@ class VoiceEngineSink(voice_recv.AudioSink):
         return False
 
     def write(self, user: discord.User | discord.Member | None, data: voice_recv.VoiceData):
-        if user is None or user.bot:
+        if user is None:
             return
+        if user.bot:
+            self_id = getattr(getattr(self.manager, "client", None), "user", None)
+            self_id = getattr(self_id, "id", None)
+            if (
+                not VOICE_ALLOW_BOT_AUDIO
+                or user.id == self_id
+                or (VOICE_ALLOWED_BOT_USER_IDS and user.id not in VOICE_ALLOWED_BOT_USER_IDS)
+            ):
+                return
         if self.allowed_user_ids and user.id not in self.allowed_user_ids:
-            return
+            if not user.bot:
+                return
         if user.id not in self.user_names:
             self.user_names[user.id] = getattr(user, "display_name", None) or user.name
             log.info(f"[VoiceSink] First audio from {self.user_names[user.id]} (id={user.id})")
@@ -1240,7 +1418,7 @@ class TTSAudioSource(discord.AudioSource):
 
     DUCK_VOLUME = 0.15  # ~-16dB when user is speaking
 
-    def __init__(self, outgoing_queue: deque):
+    def __init__(self, outgoing_queue: WakeableAudioQueue):
         self.queue = outgoing_queue
         self.buffer = b""
         self.resampler = AudioResampler()
@@ -1269,6 +1447,8 @@ class TTSAudioSource(discord.AudioSource):
                 self.playback_start_time = time.time()
                 self._has_played_audio = True
             return frame
+        elif not self.buffer:
+            return b""
         else:
             silence_needed = self.FRAME_SIZE - len(self.buffer)
             frame = self.buffer + (b"\x00" * silence_needed)
@@ -1297,7 +1477,8 @@ class VoiceManager:
         self.bridge = bridge  # ClaudeBridge instance
         self.voice_client: voice_recv.VoiceRecvClient | None = None
 
-        self._outgoing_audio: deque[bytes] = deque(maxlen=500)
+        self._outgoing_audio = WakeableAudioQueue(maxlen=500)
+        self._outgoing_audio.set_wake_callback(self._wake_audio_player)
         self._stt_manager: MultiUserSTTManager | None = None
         self._turn_coordinator: TurnCoordinator | None = None
         self._tts: StreamingTTS | None = None
@@ -1311,6 +1492,7 @@ class VoiceManager:
         self._last_tts_len = 0
         self._current_voice_channel_id: int = 0
         self._current_voice_id: str = VOICE_ID  # persists across TTS reconnects
+        self._current_sapi_voice: str = os.getenv("SAPI_VOICE", "Microsoft David")
         self._use_local_tts: bool = False  # fallback to Kokoro when ElevenLabs quota runs out
         self._last_response_text: str = ""  # for Kokoro re-synthesis on ElevenLabs failure
         self._caller_ctx_key: str | None = None  # reuse caller's Claude Code process
@@ -1331,6 +1513,11 @@ class VoiceManager:
         self._loop: asyncio.AbstractEventLoop | None = None
 
         log.info(f"[Voice] Mode: {VOICE_MODE}")
+
+    def _make_tts(self):
+        if VOICE_TTS_BACKEND == "sapi":
+            return SapiTTS(self._outgoing_audio, voice_name=self._current_sapi_voice)
+        return StreamingTTS(self._outgoing_audio, voice_id=self._current_voice_id)
 
     async def start(self):
         """Initialize voice pipeline components."""
@@ -1359,7 +1546,7 @@ class VoiceManager:
         self._turn_coordinator = TurnCoordinator(turn_manager)
 
         # Init TTS
-        self._tts = StreamingTTS(self._outgoing_audio, voice_id=self._current_voice_id)
+        self._tts = self._make_tts()
         await self._tts.connect()
 
         # Init OpenRouter LLM if needed
@@ -1423,8 +1610,21 @@ class VoiceManager:
         sink = VoiceEngineSink(self)
         self.voice_client.listen(sink)
 
+        self._audio_source = None
+
+    def _ensure_audio_player(self):
+        if not self.voice_client or not self.voice_client.is_connected():
+            return
+        if self.voice_client.is_playing():
+            return
         self._audio_source = TTSAudioSource(self._outgoing_audio)
         self.voice_client.play(self._audio_source)
+
+    def _wake_audio_player(self):
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._ensure_audio_player)
+        else:
+            self._ensure_audio_player()
 
     async def _leave_channel(self):
         if self.voice_client:
@@ -1608,6 +1808,7 @@ class VoiceManager:
         if not Path(path).exists():
             return f"File not found: {path}"
         self._cleanup_done_tasks()
+        self._playback_stop = False
         task = asyncio.create_task(self._stream_file_audio(path, volume))
         self._playback_tasks.append(task)
         return f"Playing: {Path(path).name}"
@@ -1618,6 +1819,7 @@ class VoiceManager:
         if not self.voice_client or not self.voice_client.is_connected():
             return "Not connected to a voice channel"
         self._cleanup_done_tasks()
+        self._playback_stop = False
         task = asyncio.create_task(self._stream_url_audio(url, volume))
         self._playback_tasks.append(task)
         return f"Streaming from URL..."
@@ -1628,19 +1830,60 @@ class VoiceManager:
     async def stop_playback(self):
         """Stop all current playback."""
         self._playback_stop = True
-        for task in self._playback_tasks:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-        self._playback_tasks.clear()
-        self._playback_stop = False
+        try:
+            for task in self._playback_tasks:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        log.warning(f"[Playback] Stop task failed: {e}")
+            self._playback_tasks.clear()
+        finally:
+            self._playback_stop = False
+
+    async def speak_text(self, text: str) -> str:
+        """Speak an already-completed text response into the connected channel."""
+        text = text.strip()
+        if not text:
+            return "No text to speak"
+        if not self.voice_client or not self.voice_client.is_connected():
+            return "Not connected to a voice channel"
+
+        if self._tts and getattr(self._tts, "_response_active", False):
+            await self._tts.cancel_response()
+
+        if VOICE_TTS_BACKEND == "sapi":
+            if not self._tts or not isinstance(self._tts, SapiTTS):
+                self._tts = SapiTTS(self._outgoing_audio, voice_name=self._current_sapi_voice)
+                await self._tts.connect()
+        elif self._use_local_tts:
+            if not self._tts or not isinstance(self._tts, KokoroTTS):
+                self._tts = KokoroTTS(self._outgoing_audio)
+                await self._tts.connect()
+        elif not self._tts or not self._tts.is_connected():
+            self._tts = StreamingTTS(self._outgoing_audio, voice_id=self._current_voice_id)
+            await self._tts.connect()
+
+        self._last_response_text = text
+        self._turn_t0 = time.time()
+        self._reset_tts_tracking()
+        await self._tts.prepare_response()
+        await self._tts.send_token(text)
+        await self._tts.finish_response()
+        return f"Spoke {len(text)} chars"
 
     async def switch_voice(self, voice_name: str) -> str:
         """Switch TTS voice by name. Reconnects the TTS WebSocket."""
         name = voice_name.lower().strip()
+        if name in SAPI_VOICE_REGISTRY:
+            self._current_sapi_voice = SAPI_VOICE_REGISTRY[name]
+            self._tts = SapiTTS(self._outgoing_audio, voice_name=self._current_sapi_voice)
+            await self._tts.connect()
+            log.info(f"[Voice] Switched to SAPI voice: {name} ({self._current_sapi_voice})")
+            return f"Switched to {name} voice ({self._current_sapi_voice})"
         if name not in VOICE_REGISTRY:
             available = ", ".join(f"{k} ({v})" for k, v in VOICE_DESCRIPTIONS.items())
             return f"Unknown voice '{voice_name}'. Available: {available}"
@@ -1672,11 +1915,13 @@ class VoiceManager:
         )
         try:
             chunk_size = 2400  # 50ms at 24kHz mono (2 bytes/sample)
+            frames = 0
             log.info(f"[Playback] Started: {path}")
             while not self._playback_stop:
                 data = await proc.stdout.read(chunk_size)
                 if not data:
                     break
+                frames += 1
                 if volume != 1.0:
                     samples = np.frombuffer(data, dtype=np.int16).astype(np.float32)
                     samples *= volume
@@ -1684,11 +1929,15 @@ class VoiceManager:
                 self._outgoing_audio.append(data)
                 # Pace to ~realtime so we don't flood the buffer
                 await asyncio.sleep(0.04)
-            log.info(f"[Playback] Finished: {path}")
+            if frames == 0:
+                stderr = (await proc.stderr.read()).decode("utf-8", errors="replace").strip()
+                log.warning(f"[Playback] No audio decoded from {path}; stop={self._playback_stop} stderr={stderr[:500]}")
+            log.info(f"[Playback] Finished: {path} ({frames} frames)")
         except asyncio.CancelledError:
             log.info(f"[Playback] Cancelled: {path}")
         finally:
-            proc.kill()
+            if proc.returncode is None:
+                proc.kill()
             await proc.wait()
 
     async def _stream_url_audio(self, url: str, volume: float = 0.5):
@@ -1702,22 +1951,28 @@ class VoiceManager:
         )
         try:
             chunk_size = 2400
+            frames = 0
             log.info(f"[Playback] Streaming URL: {url}")
             while not self._playback_stop:
                 data = await proc.stdout.read(chunk_size)
                 if not data:
                     break
+                frames += 1
                 if volume != 1.0:
                     samples = np.frombuffer(data, dtype=np.int16).astype(np.float32)
                     samples *= volume
                     data = np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
                 self._outgoing_audio.append(data)
                 await asyncio.sleep(0.04)
-            log.info(f"[Playback] URL finished: {url}")
+            if frames == 0:
+                stderr = (await proc.stderr.read()).decode("utf-8", errors="replace").strip()
+                log.warning(f"[Playback] No URL audio decoded from {url}; stop={self._playback_stop} stderr={stderr[:500]}")
+            log.info(f"[Playback] URL finished: {url} ({frames} frames)")
         except asyncio.CancelledError:
             log.info(f"[Playback] URL cancelled: {url}")
         finally:
-            proc.kill()
+            if proc.returncode is None:
+                proc.kill()
             await proc.wait()
 
     # ── Main loop ─────────────────────────────────────────────────────────
@@ -1728,7 +1983,20 @@ class VoiceManager:
         log.info(f"[TIMING] Turn consumed: {transcript[:100]!r}")
 
         # Prepare TTS — use local Kokoro fallback if ElevenLabs quota exhausted
-        if self._use_local_tts:
+        # (check the previous session's quota flag too: ElevenLabs accepts connects
+        # and only dies at generation time, so an interrupted turn can strand the
+        # error without ever setting _use_local_tts — see 2026-08-20 payment incident)
+        if VOICE_TTS_BACKEND == "sapi":
+            if not self._tts or not isinstance(self._tts, SapiTTS):
+                self._tts = SapiTTS(self._outgoing_audio, voice_name=self._current_sapi_voice)
+                await self._tts.connect()
+            await self._tts.prepare_response()
+        elif (isinstance(self._tts, StreamingTTS) and getattr(self._tts, "_quota_error", False)):
+            log.warning("[TTS] Previous ElevenLabs session hit quota/payment error — switching to local Kokoro TTS")
+            self._use_local_tts = True
+        if VOICE_TTS_BACKEND == "sapi":
+            pass
+        elif self._use_local_tts:
             if not self._tts or not isinstance(self._tts, KokoroTTS):
                 self._tts = KokoroTTS(self._outgoing_audio)
                 await self._tts.connect()
@@ -1952,36 +2220,45 @@ class VoiceManager:
         if not delta:
             return
 
-        # Detect and suppress bot_action blocks from TTS
-        if not hasattr(self, '_in_bot_action'):
-            self._in_bot_action = False
-        if not hasattr(self, '_bot_action_buffer'):
-            self._bot_action_buffer = ""
+        combined = getattr(self, '_pre_action_buffer', '') + delta
+        self._pre_action_buffer = ""
+        speak_parts: list[str] = []
+        marker = "```bot_action"
 
-        if self._in_bot_action:
-            self._bot_action_buffer += delta
-            # Check if block ended
-            if "```" in self._bot_action_buffer.split("```bot_action", 1)[-1]:
-                # Block complete — don't send to TTS
-                log.info(f"[Voice] Suppressed bot_action block from TTS")
+        while combined:
+            if getattr(self, '_in_bot_action', False):
+                end = combined.find("```")
+                if end == -1:
+                    self._bot_action_buffer = getattr(self, '_bot_action_buffer', '') + combined
+                    return
+                self._bot_action_buffer = getattr(self, '_bot_action_buffer', '') + combined[:end + 3]
+                log.info("[Voice] Suppressed bot_action block from TTS")
                 self._in_bot_action = False
                 self._bot_action_buffer = ""
-            return
+                combined = combined[end + 3:]
+                continue
 
-        # Check if we're entering a bot_action block
-        combined = (getattr(self, '_pre_action_buffer', '') + delta)
-        self._pre_action_buffer = ""
-        if "```bot_action" in combined:
-            # Split: text before block goes to TTS, block gets suppressed
-            before = combined.split("```bot_action")[0]
-            if before.strip():
-                await self._tts.send_token(before)
-            self._in_bot_action = True
-            self._bot_action_buffer = "```bot_action" + combined.split("```bot_action", 1)[1]
-            return
-        # Buffer a bit in case ``` is split across deltas
-        if combined.endswith("`") or combined.endswith("``"):
-            self._pre_action_buffer = combined
+            start = combined.find(marker)
+            if start != -1:
+                if start > 0:
+                    speak_parts.append(combined[:start])
+                self._in_bot_action = True
+                self._bot_action_buffer = marker
+                combined = combined[start + len(marker):]
+                continue
+
+            # Hold a tail long enough to catch a split marker before it leaks.
+            keep = min(len(marker) - 1, len(combined))
+            if keep and marker.startswith(combined[-keep:]):
+                if len(combined) > keep:
+                    speak_parts.append(combined[:-keep])
+                self._pre_action_buffer = combined[-keep:]
+            else:
+                speak_parts.append(combined)
+            break
+
+        combined = "".join(speak_parts)
+        if not combined:
             return
 
         t_turn = getattr(self, '_turn_t0', None)

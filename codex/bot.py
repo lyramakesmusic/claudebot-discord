@@ -38,8 +38,30 @@ from shared.discord_utils import split_message
 from shared.plugin import PluginContext
 from shared.plugin_loader import load_plugins
 from shared.state import BotState
+from shared.reactions import format_reactions, register as register_reactions
 
 load_dotenv()
+os.environ.setdefault("SAPI_VOICE", os.getenv("CODEX_SAPI_VOICE", "Microsoft David"))
+os.environ.setdefault("VOICE_ALLOW_BOT_AUDIO", "1")
+
+# Voice pipeline (optional, shared with clod). Patch voice_recv before import.
+try:
+    from integrations.voice.recv_patch import apply_patch as apply_voice_recv_patch
+    apply_voice_recv_patch()
+except Exception:
+    pass
+try:
+    from integrations.voice.manager import VoiceManager as BaseVoiceManager
+    from integrations.voice.manager import VOICE_SYSTEM_PROMPT
+except Exception as _voice_err:
+    BaseVoiceManager = None
+    VOICE_SYSTEM_PROMPT = (
+        "You are in a voice chat. Keep responses SHORT — 1-2 sentences max. "
+        "Be conversational, not monologue-y. No markdown."
+    )
+    logging.getLogger("codexbot").warning(
+        f"Voice disabled: {type(_voice_err).__name__}: {_voice_err}"
+    )
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -94,11 +116,63 @@ _injected_lock = asyncio.Lock()
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
+intents.voice_states = True
 
 client = discord.Client(intents=intents)
+register_reactions(client)
 configure_actions(state, log, _BOT_FILE, DOCUMENTS_DIR)
+voice_manager = None
 _plugin_mgr = None
 _plugin_tasks: list[asyncio.Task] = []
+
+
+if BaseVoiceManager is not None:
+    class CodexVoiceManager(BaseVoiceManager):
+        async def _respond_claude_code(self, transcript: str, t_turn: float):
+            ctx_key = self._caller_ctx_key or (
+                f"voice:{self._current_voice_channel_id}" if self._current_voice_channel_id else "voice:0"
+            )
+            cwd = str(Path.home() / "Documents")
+            if self.bridge.is_busy(ctx_key):
+                log.info("[Voice] Interrupting current Codex response")
+                await self.bridge.interrupt(ctx_key)
+                await asyncio.sleep(0.1)
+
+            voice_msg = (
+                "[voice message — respond in 1-2 short sentences, no markdown. "
+                "bot_action blocks still work for play_audio/play_url/stop_audio/join_voice/etc.]\n"
+                f"{transcript}"
+            )
+            result = await self.bridge.send_turn(
+                ctx_key,
+                cwd,
+                voice_msg,
+                system_prompt=VOICE_SYSTEM_PROMPT,
+                on_text=self._stream_to_tts,
+                timeout=180,
+            )
+            log.info(f"[TIMING] Codex voice turn done t+{(time.time()-t_turn)*1000:.0f}ms")
+
+            self._in_bot_action = False
+            self._bot_action_buffer = ""
+            self._pre_action_buffer = ""
+            self._cc_first_token_logged = False
+
+            if result.get("error"):
+                log.warning(f"[Voice] Codex error: {result.get('error_message', '')[:100]}")
+
+            full_text = result.get("text", "")
+            speakable = re.sub(r"```bot_action\s*\n.*?\n```", "", full_text, flags=re.DOTALL).strip()
+            self._last_response_text = speakable
+            if "bot_action" in full_text:
+                await self._execute_voice_actions(full_text)
+else:
+    CodexVoiceManager = None
+
+
+def _set_voice_manager(new_manager):
+    global voice_manager
+    voice_manager = new_manager
 
 
 def _read_plugin_names(config_path: Path, default_names: list[str]) -> list[str]:
@@ -171,6 +245,9 @@ async def _load_plugins():
             "create_flags": CREATE_FLAGS,
             "home_channel_id": HOME_CHANNEL_ID,
             "typing_interval": TYPING_INTERVAL,
+            "voice_manager_cls": CodexVoiceManager,
+            "get_voice_manager": lambda: voice_manager,
+            "set_voice_manager": _set_voice_manager,
         },
     )
     _plugin_mgr = await load_plugins(plugin_names, ctx)
@@ -178,16 +255,22 @@ async def _load_plugins():
     log.info(f"Loaded plugins: {', '.join(loaded) if loaded else '(none)'}")
 
 
-async def _dispatch_actions(actions, message, channel, guild_id):
+async def _dispatch_actions(actions, message, channel, guild_id, caller_ctx_key=None):
     all_results: list[str] = []
     pending_reload = False
     for action in actions:
         action_name = action.get("action", "")
         handled = False
         payload = {}
+        log.info(f"[actions] Dispatching bot_action: {action_name}")
         if _plugin_mgr is not None:
             handled, payload = await _plugin_mgr.dispatch_action(
-                action_name, action, message, channel, guild_id
+                action_name,
+                action,
+                message,
+                channel,
+                guild_id,
+                caller_ctx_key=caller_ctx_key,
             )
         if not handled:
             results, reload_flag = await dispatch_bot_actions([action], message, channel, guild_id)
@@ -242,6 +325,16 @@ async def on_ready():
     except Exception as e:
         log.error(f"Failed to start codex app-server: {e}")
     await _load_plugins()
+
+
+@client.event
+async def on_voice_state_update(member: discord.Member,
+                                before: discord.VoiceState,
+                                after: discord.VoiceState):
+    if _plugin_mgr is not None and _plugin_mgr.has_event("on_voice_state_update"):
+        await _plugin_mgr.fire_event("on_voice_state_update", member, before, after)
+    elif voice_manager:
+        await voice_manager.on_voice_state_update(member, before, after)
 
 
 @client.event
@@ -307,17 +400,24 @@ async def on_message(message: discord.Message):
     if mentioned:
         try:
             recent: list[str] = []
+            own_reacts = ""
             async for hist_msg in channel.history(limit=20, before=message):
                 if hist_msg.author == client.user:
+                    own_reacts = format_reactions(hist_msg)
                     break  # stop at our last message
                 msg_text = (hist_msg.content or "").strip()
+                reacts = format_reactions(hist_msg)
+                if reacts:
+                    msg_text += f"\n  [reacts: {reacts}]"
                 if msg_text:
                     author = hist_msg.author.display_name or hist_msg.author.name
                     recent.append(f"[{author}]\n{msg_text}")
                 if len(recent) >= 5:
                     break
-            if recent:
+            if recent or own_reacts:
                 recent.reverse()  # chronological order
+                if own_reacts:
+                    recent.insert(0, f"[reactions on your last reply: {own_reacts}]")
                 prev_context = "\n\n".join(recent)
         except Exception:
             pass
@@ -327,6 +427,16 @@ async def on_message(message: discord.Message):
 
     # ── Manual reload / restart commands ─────────────────────
     _cmd = content.lower().strip()
+
+    if _cmd == ".new-context" or _cmd.startswith(".new-context "):
+        ctx_key = str(channel.id)
+        # Clear stored thread so next message creates a fresh one
+        bridge._threads.pop(ctx_key, None)
+        state.clear_session(ctx_key)
+        await message.add_reaction("✅")
+        await message.reply("Context cleared — next message starts a fresh conversation.", mention_author=False)
+        return
+
     if _cmd == "/usage":
         await message.reply("Usage tracking not implemented for Codex yet.", mention_author=False)
         return
@@ -515,6 +625,19 @@ async def on_message(message: discord.Message):
         except Exception as e:
             log.warning(f"Failed to send tool status: {e}")
 
+    async def _speak_thread_reply(text_to_speak: str):
+        if not text_to_speak.strip() or not voice_manager:
+            return
+        if not voice_manager.voice_client or not voice_manager.voice_client.is_connected():
+            return
+        if getattr(voice_manager, "_caller_ctx_key", None) != ctx_key:
+            return
+        try:
+            result_msg = await voice_manager.speak_text(text_to_speak)
+            log.info(f"[Voice] Thread reply TTS: {result_msg}")
+        except Exception:
+            log.exception("[Voice] Failed to speak thread reply")
+
     next_prompt = user_msg
     pending_reload = False
     try:
@@ -573,9 +696,12 @@ async def on_message(message: discord.Message):
                             await channel.send(chunk)
                         except Exception as e:
                             log.warning(f"Failed to send chunk: {e}")
+                    await _speak_thread_reply(final_text)
 
                 if actions:
-                    action_results, pending_reload = await _dispatch_actions(actions, message, channel, guild_id)
+                    action_results, pending_reload = await _dispatch_actions(
+                        actions, message, channel, guild_id, caller_ctx_key=ctx_key
+                    )
                     if action_results:
                         remaining = sanitize("\n".join(action_results))
                         for chunk in split_message(remaining):

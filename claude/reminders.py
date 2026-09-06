@@ -1,6 +1,7 @@
 """Reminder parsing and persistence for Claude bot."""
 
 import json
+import os
 import logging
 import re
 import subprocess
@@ -101,6 +102,17 @@ def format_reminders_for_prompt() -> str:
 
 
 def send_toast(title: str, message: str):
+    """Desktop notification: Windows toast or macOS Notification Center."""
+    if os.name != "nt":
+        try:
+            esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
+            subprocess.Popen(
+                ["osascript", "-e", f'display notification "{esc(message)}" with title "{esc(title)}" sound name "default"'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            _log.warning(f"Notification failed: {exc}")
+        return
     try:
         ps_script = f'''
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null

@@ -34,8 +34,15 @@ class BotState:
     def _save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._data, indent=2), "utf-8")
-        tmp.replace(self.path)
+        try:
+            tmp.write_text(json.dumps(self._data, indent=2), "utf-8")
+            tmp.replace(self.path)
+        except OSError as exc:
+            log.error("Failed to save bot state to %s: %s", self.path, exc)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def get_session(self, key: str) -> Optional[dict]:
         return self._data["sessions"].get(key)

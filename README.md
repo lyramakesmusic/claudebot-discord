@@ -1,17 +1,18 @@
 # claudebot
 
-Discord bot system that bridges Discord to [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI. Runs 24/7 on a Windows desktop, managing persistent AI sessions across multiple servers with image generation, music generation, voice conversations, and multi-model research.
+Discord bot system that bridges Discord to [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI. Runs 24/7 on a MacBook (Windows also supported), managing persistent AI sessions across multiple servers with image generation, music generation, voice conversations, and multi-model research.
 
 > Built and maintained collaboratively by Claude and [Lyra](https://github.com/lyramakesmusic).
 
 ## Architecture
 
 ```
-Scheduled Task (Windows logon)
+launchd agent (macOS login) / Scheduled Task (Windows logon)
   -> run.py (restarts supervisor if it exits)
     -> supervisor.py (restarts bots if they exit)
       -> claude bot     (Discord bot token, Claude Code CLI backend)
       -> codex bot      (Discord bot token, Codex CLI backend)
+      -> claire         (second Claude bot, Fable model; only if .env.claire has a token)
 ```
 
 Each bot connects to Discord independently. The Claude bot spawns **persistent Claude Code CLI processes** per conversation context (channel or thread), communicating via `--input-format stream-json --output-format stream-json` over stdin/stdout. Sessions survive across messages — Claude Code maintains its own conversation history internally, and the bot resumes sessions by ID.
@@ -88,7 +89,8 @@ claudebot/
 │   └── attachments/                 # Downloaded Discord attachments (auto-cleanup 24h)
 ├── scripts/                         # Operational utilities
 │   ├── nuke_and_restart.py          # Kill everything, clean locks, restart supervisor
-│   ├── restart.ps1                  # PowerShell restart
+│   ├── install_launchd.py           # macOS: install/uninstall the launchd agent
+│   ├── restart.sh / restart.ps1     # Full restart (macOS / Windows)
 │   └── check_procs.py              # Process status
 ├── logs/                            # Bot + supervisor logs
 └── .env                             # Tokens and API keys
@@ -144,6 +146,8 @@ Discord message arrives
   ├─ Special commands: stop/abort, reload, compact, usage, context switching
   │
   ├─ Download attachments (images, PDFs → text extraction)
+  ├─ Fetch recent messages since the bot last spoke, annotated with emoji reactions
+  │     (who reacted is tracked from gateway events; reactions never trigger a reply)
   ├─ Resolve context key:
   │     Main channel → ctx_key = channel_id (orchestrator mode)
   │     Project thread → ctx_key = "proj:{name}" (project mode)
@@ -306,8 +310,8 @@ Sessions map context keys to Claude Code session IDs. When a context is reopened
 
 ### Prerequisites
 
-- Windows 10/11 (the bot uses Windows-specific process flags, WASAPI audio, etc.)
-- Python 3.12+ with `uv` package manager
+- macOS (Apple Silicon) or Windows 10/11 — process management, notifications, and the restart script are per-platform
+- Python 3.13 with `uv` package manager
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - Discord bot application with Message Content intent enabled
 - ffmpeg on PATH (for voice + audio processing)
@@ -323,9 +327,11 @@ BOT_USER_ID=your_bot_user_id
 CODEX_DISCORD_TOKEN=your_codex_bot_token      # optional
 CODEX_BOT_USER_ID=codex_bot_user_id           # optional
 
-# Claude Code — required
-CLAUDE_CMD=claude                              # or full path to claude.exe
+# Claude Code — required (absolute paths: launchd/Task Scheduler have a minimal PATH)
+CLAUDE_CMD=/absolute/path/to/claude            # claude.exe on Windows
 CLAUDE_MODEL=                                  # blank = use ~/.claude/settings.json model
+CODEX_CMD=/absolute/path/to/codex              # codex bot; codex.cmd on Windows
+CODEX_MODEL=                                   # blank = follow ~/.codex/config.toml
 
 # Owner
 OWNER_ID=your_discord_user_id                  # numeric Discord user ID
@@ -352,9 +358,8 @@ VOICE_ALLOWED_USER_IDS=789                     # comma-separated
 git clone <repo-url> claudebot
 cd claudebot
 
-# Create venv and install dependencies
-uv venv
-uv pip install -e .
+# Create venv and install dependencies (torch/kokoro resolve per-platform via pyproject markers)
+uv sync
 
 # Copy and edit .env
 cp .env.example .env  # fill in tokens
@@ -362,9 +367,26 @@ cp .env.example .env  # fill in tokens
 # Verify Claude Code CLI works
 claude --version
 
-# Start
-python run.py
+# Start in the foreground (Ctrl+C stops everything)
+.venv/bin/python run.py
 ```
+
+### Running 24/7 on macOS (launchd)
+
+```bash
+.venv/bin/python scripts/install_launchd.py              # install + start; survives logout/reboot
+.venv/bin/python scripts/install_launchd.py --uninstall
+.venv/bin/python scripts/install_launchd.py --plist-only  # rewrite the plist without restarting
+launchctl print gui/$(id -u)/com.lyra.claudebot | head    # status
+tail -f logs/supervisor.log logs/claudebot.log            # what's happening
+scripts/restart.sh                                        # full restart (also what `restart` in Discord runs)
+```
+
+The agent runs `run.py` under `caffeinate -is` with `KeepAlive`, so the machine stays awake and the whole chain comes back if anything exits. Logs from the agent itself land in `logs/launchd.*.log`.
+
+### Running 24/7 on Windows (Task Scheduler)
+
+`python scripts/setup_scheduled_task.py` installs a logon task that runs `run.py` under `pythonw.exe`. `scripts/restart.ps1` is the Windows full-restart script.
 
 ### Claude Code Configuration
 

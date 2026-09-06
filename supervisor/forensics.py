@@ -24,7 +24,7 @@ def _system_snapshot() -> dict:
             "percent_used": vm.percent,
         }
         info["cpu_percent"] = psutil.cpu_percent(interval=0.1)
-        disk = psutil.disk_usage("C:\\")
+        disk = psutil.disk_usage("C:\\" if os.name == "nt" else "/")
         info["disk"] = {
             "total_gb": round(disk.total / (1024**3), 1),
             "free_gb": round(disk.free / (1024**3), 1),

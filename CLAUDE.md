@@ -14,7 +14,7 @@ is away from her desktop, she has NO way to fix it.
    bot, build it standalone — do NOT import from, modify, or integrate with this
    codebase unless the user EXPLICITLY says "modify claudebot" in THIS project's
    thread.
-2. **NEVER modify files in this directory** (`C:\Users\Lyra\Documents\claudebot\`)
+2. **NEVER modify files in this directory** (`/Users/lyra/Projects/claudebot/`)
    from a session whose cwd is elsewhere. If you find yourself reaching into this
    path from another project — STOP. You are about to break production.
 3. **NEVER add dependencies, change supervisor config, or touch .env** from outside.

@@ -48,6 +48,9 @@ from claude.reminders import PST as PST_MODULE
 from claude.reminders import REMINDER_ACTION_RE
 from claude.reminders import format_reminders_for_prompt as format_reminders_for_prompt_module
 from claude.reminders import process_reminder_actions as process_reminder_actions_module
+from claude.scratch import SCRATCH_ACTION_RE
+from claude.scratch import configure as configure_scratch_module
+from claude.scratch import process_scratch_actions as process_scratch_actions_module
 from claude.research import configure as configure_research_module
 from claude.research import try_handle_research_command as try_handle_research_command_module
 from claude.system_stats import configure as configure_system_stats_module
@@ -61,11 +64,14 @@ from shared.discord_utils import is_guild_channel as _is_guild_channel
 from shared.discord_utils import sanitize
 from shared.discord_utils import split_message
 from shared.plugin import PluginContext
+from shared.reactions import format_reactions, register as register_reactions
 from shared.plugin_loader import load_plugins
 from shared.state import BotState
 from shared.usage import context_percent, fetch_plan_usage, format_reset_time
 
 load_dotenv()
+os.environ.setdefault("SAPI_VOICE", os.getenv("CLAUDE_SAPI_VOICE", "Microsoft Zira"))
+os.environ.setdefault("VOICE_ALLOW_BOT_AUDIO", "1")
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -74,7 +80,10 @@ CLAUDE_CMD = os.getenv("CLAUDE_CMD", "claude")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "")  # blank = default
 DOCUMENTS_DIR = Path.home() / "Documents"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-STATE_FILE = PROJECT_ROOT / "data" / "state.json"
+STATE_FILE = Path(os.getenv("STATE_FILE", str(PROJECT_ROOT / "data" / "state.json")))
+# scratch notes are per-instance (not shared like memories): anchor to the
+# instance's state dir — data/claire/ for claire, data/ for clod.
+configure_scratch_module(scratch_dir=STATE_FILE.parent)
 DEFAULT_CWD = str(DOCUMENTS_DIR)
 TYPING_INTERVAL = 8       # seconds between typing indicator refreshes
 
@@ -87,6 +96,48 @@ GENERATED_IMAGES_DIR = PROJECT_ROOT / "data" / "generated_images"
 
 # Suno music generation (see suno.py)
 from integrations.suno import enqueue_music
+
+
+def _is_auth_error(err: str) -> bool:
+    err_lower = err.lower()
+    return any(
+        phrase in err_lower
+        for phrase in (
+            "failed to authenticate",
+            "authentication_failed",
+            "invalid authentication credentials",
+            "api error: 401",
+        )
+    )
+
+
+def _is_stale_session_error(err: str) -> bool:
+    if _is_auth_error(err):
+        return False
+    err_lower = err.lower()
+    return any(
+        phrase in err_lower
+        for phrase in (
+            "session not found",
+            "invalid session",
+            "unknown session",
+            "conversation not found",
+            "invalid conversation",
+            "unknown conversation",
+            "thread not found",
+            "invalid thread",
+            "unknown thread",
+            "resume",
+        )
+    )
+
+async def _reply_or_send(message, channel, content, **kwargs):
+    """Reply to the original message; if it was deleted, fall back to channel.send."""
+    try:
+        return await message.reply(content, **kwargs)
+    except discord.NotFound:
+        return await channel.send(content, **kwargs)
+
 
 # Midjourney image generation (see midjourney.py)
 from integrations.midjourney import enqueue_midjourney
@@ -208,6 +259,7 @@ intents.voice_states = True
 intents.members = True
 
 client = discord.Client(intents=intents, max_messages=200)
+register_reactions(client)
 voice_manager = None  # VoiceManager instance if voice deps available
 
 
@@ -357,6 +409,7 @@ async def _dispatch_actions(actions, message, channel, guild_id, caller_ctx_key=
         action_name = action.get("action", "")
         handled = False
         payload = {}
+        log.info(f"[actions] Dispatching bot_action: {action_name}")
         if _plugin_mgr is not None:
             handled, payload = await _plugin_mgr.dispatch_action(
                 action_name,
@@ -393,6 +446,7 @@ def _strip_text_for_display(text: str) -> str:
         cleaned = MEMORY_ACTION_RE.sub("", cleaned)
     if "reminders" not in loaded_names:
         cleaned = REMINDER_ACTION_RE.sub("", cleaned)
+    cleaned = SCRATCH_ACTION_RE.sub("", cleaned)
     return cleaned
 
 
@@ -420,6 +474,7 @@ async def _process_plugin_text(
         text = process_memory_actions_module(text, channel_name, server_name, guild_id)
     if "reminders" not in loaded_names:
         text = process_reminder_actions_module(text, channel_id, channel_name, requester_id)
+    text = process_scratch_actions_module(text, channel_name, server_name, guild_id)
     return text
 
 
@@ -540,12 +595,25 @@ async def _run_bridge_task(
     tool_log = []
 
     async def _flush_unsent_text():
-        """Send any intermediate text we haven't sent yet as a new message."""
+        """Send any intermediate text we haven't sent yet as a new message.
+
+        Holds back text from the first special-block fence (memory / reminder /
+        bot_action) onward, so those blocks are never streamed or split across
+        Discord messages mid-generation — they're processed whole at end-of-turn.
+        """
         nonlocal sent_text_len
         if len(current_text) <= sent_text_len:
             return
         unsent = current_text[sent_text_len:]
-        cleaned = _strip_text_for_display(unsent)
+        hold = len(unsent)
+        for _fence in ("```memory", "```reminder", "```bot_action", "```scratch"):
+            _i = unsent.find(_fence)
+            if _i != -1 and _i < hold:
+                hold = _i
+        if hold == 0:
+            return  # unsent begins with a special block; keep it for end-of-turn
+        safe_raw = unsent[:hold]
+        cleaned = _strip_text_for_display(safe_raw)
         cleaned, _ = extract_bot_actions_module(cleaned)
         cleaned = cleaned.strip()
         if cleaned:
@@ -554,7 +622,7 @@ async def _run_bridge_task(
                     await channel.send(chunk)
                 except Exception:
                     pass
-        sent_text_len = len(current_text)
+        sent_text_len += hold
 
     async def on_text(full_text: str):
         nonlocal current_text
@@ -575,6 +643,15 @@ async def _run_bridge_task(
         except Exception as e:
             log.warning(f"Failed to send tool status '{desc}': {e}")
 
+    # /goal and /compact-style slash commands bypass the user_msg wrapping
+    _raw_lower = (message.content or "").strip().lower()
+    _raw_lower = re.sub(rf"<@!?{client.user.id}>", "", _raw_lower).strip()
+    if _raw_lower.startswith("/goal"):
+        # Send the raw /goal command directly to Claude Code
+        raw_content = re.sub(rf"<@!?{client.user.id}>", "", (message.content or "")).strip()
+        user_msg = raw_content
+        log.info("/goal command for %s: %s", ctx_key, user_msg)
+
     try:
         result = await pp.send(
             user_msg, on_text=on_text, on_tool=on_tool,
@@ -584,13 +661,28 @@ async def _run_bridge_task(
         typing_task.cancel()
         cleanup_message_attachments(att_paths)
         try:
-            await message.reply(f"{prefix}Error: {e}", mention_author=False)
+            await _reply_or_send(message, channel, f"{prefix}Error: {e}", mention_author=False)
         except Exception:
             pass
         _ctx_processing.discard(ctx_key)
         return
 
     log.info(f"bridge.send finished: error={result['error']} text_len={len(result.get('text',''))} tools={len(result.get('tools',[]))}")
+
+    # ── Surface safeguard-triggered model switches (e.g. fable -> opus) ──
+    # The model can be auto-swapped mid-turn if a safeguard flags the message.
+    # Don't let that happen silently — tell the channel it wasn't the requested model.
+    _switch = result.get("model_switched")
+    if _switch:
+        try:
+            _from, _to = _switch
+            await channel.send(
+                f"⚠️ heads up — a safeguard flagged this one mid-generation and "
+                f"auto-switched models (`{_from}` → `{_to}`). this reply finished on "
+                f"the fallback model, not the one you set."
+            )
+        except Exception:
+            pass
 
     # typing stays alive until we've finished sending everything
     pending_reload = False
@@ -602,14 +694,13 @@ async def _run_bridge_task(
         # ── Handle errors ────────────────────────────────────────
         if result["error"]:
             err = result.get("error_message") or "Unknown error"
-            await message.reply(
+            await _reply_or_send(message, channel,
                 f"{prefix}Error:\n```\n{err[:1800]}\n```", mention_author=False
             )
 
-            # Stale session or process died? Kill and retry
-            is_stale = session_id and any(
-                w in err.lower() for w in ("session", "resume", "not found", "invalid")
-            )
+            # Stale session or process died? Kill and retry.
+            # Auth failures need to surface as auth failures, not fresh-session retries.
+            is_stale = bool(session_id and _is_stale_session_error(err))
             process_died = not pp.alive
 
             if is_stale or process_died:
@@ -644,7 +735,7 @@ async def _run_bridge_task(
         # Fall back to result text only if we got nothing from streaming.
         text = current_text or result.get("text", "")
         if not text and sent_text_len == 0:
-            await message.reply(f"{prefix}*(empty response)*", mention_author=False)
+            await _reply_or_send(message, channel, f"{prefix}*(empty response)*", mention_author=False)
             return
         if not text:
             # all content was sent as intermediate messages, nothing left
@@ -672,14 +763,29 @@ async def _run_bridge_task(
             unsent_raw = current_text[sent_text_len:] if sent_text_len < len(current_text) else ""
             unsent = _strip_text_for_display(unsent_raw)
             final_cleaned, _ = extract_bot_actions_module(unsent)
+            # strip memory/reminder blocks from DISPLAY only — they were already
+            # saved by _process_plugin_text above; this just keeps them off-screen
+            final_cleaned = MEMORY_ACTION_RE.sub("", final_cleaned)
+            final_cleaned = REMINDER_ACTION_RE.sub("", final_cleaned)
+            final_cleaned = SCRATCH_ACTION_RE.sub("", final_cleaned)
             final_text = final_cleaned.strip()
         else:
             final_text = cleaned_text
 
+        # send thinking summary as a separate message before the response
+        thinking = result.get("thinking", "")
+        if thinking:
+            thinking_chunks = split_message(sanitize(f"*{thinking.strip()}*"))
+            for chunk in thinking_chunks:
+                try:
+                    await channel.send(chunk)
+                except Exception:
+                    pass
+
         if final_text:
             text_chunks = split_message(sanitize(prefix + final_text))
             try:
-                await message.reply(text_chunks[0], mention_author=False)
+                await _reply_or_send(message, channel, text_chunks[0], mention_author=False)
             except Exception:
                 pass
             for chunk in text_chunks[1:]:
@@ -853,7 +959,7 @@ async def _run_bridge_task(
 
         if not text_already_sent and not user_results and not reply_files:
             if sent_text_len == 0:
-                await message.reply(f"{prefix}*(empty response)*", mention_author=False)
+                await _reply_or_send(message, channel, f"{prefix}*(empty response)*", mention_author=False)
 
         cost = result.get("cost_usd", 0)
         n_tools = len(result.get("tools", []))
@@ -975,6 +1081,14 @@ async def on_message(message: discord.Message):
     # ── Should we respond? ───────────────────────────────────
     mentioned = client.user in message.mentions
 
+    # Also respond to @clodex role mention
+    CLODEX_ROLE_ID = 1512477753696321729
+    if not mentioned and message.role_mentions:
+        for role in message.role_mentions:
+            if role.id == CLODEX_ROLE_ID:
+                mentioned = True
+                break
+
     # Bots (including sibling codex) can talk to us via explicit @mention only.
     # Never auto-respond to a bot's reply — only mentions.
     if message.author.bot:
@@ -1011,6 +1125,7 @@ async def on_message(message: discord.Message):
         state.set_guild_config(guild_id, home_ch, slug, str(docs_dir))
         guild_config = state.get_guild_config(guild_id)
     docs_dir = Path(guild_config["docs_dir"])
+    docs_dir.mkdir(parents=True, exist_ok=True)
 
     def _resolve_ctx_key() -> str:
         """Resolve the correct ctx_key for the current channel/thread."""
@@ -1086,22 +1201,31 @@ async def on_message(message: discord.Message):
         except Exception:
             pass
 
-        await message.reply("\n".join(lines), mention_author=False)
+        await _reply_or_send(message, channel, "\n".join(lines), mention_author=False)
+        return
+
+    if _cmd == "/scratch":
+        from claude.scratch import scratch_file
+        guild_id = message.guild.id if message.guild else None
+        path = scratch_file(guild_id)
+        if path.exists() and path.stat().st_size > 0:
+            await channel.send(
+                "latest scratchpad:",
+                file=discord.File(str(path), filename=path.name),
+            )
+        else:
+            await _reply_or_send(message, channel, "no scratch file yet", mention_author=False)
         return
 
     if _cmd == "restart":
         # restart = kill supervisor + all bots, relaunch from scratch
-        restart_script = PROJECT_ROOT / "scripts" / "restart.ps1"
-        if not restart_script.exists():
-            await message.reply("restart.ps1 not found", mention_author=False)
+        from shared.restart import restart_script_path, launch_full_restart
+        if not restart_script_path(PROJECT_ROOT).exists():
+            await _reply_or_send(message, channel, f"{restart_script_path(PROJECT_ROOT).name} not found", mention_author=False)
             return
         await message.add_reaction("\u2705")
         await channel.send("Full restart in progress...")
-        subprocess.Popen(
-            ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(restart_script)],
-            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
-            close_fds=True,
-        )
+        launch_full_restart(PROJECT_ROOT)
         await asyncio.sleep(1)
         os._exit(0)
 
@@ -1109,7 +1233,7 @@ async def on_message(message: discord.Message):
         ctx_key = _resolve_ctx_key()
         pp = bridge.get_process(ctx_key)
         if not pp or not pp._alive:
-            await message.reply("No active session to compact.", mention_author=False)
+            await _reply_or_send(message, channel, "No active session to compact.", mention_author=False)
             return
         log.info("Manual compact requested for %s", ctx_key)
         await message.add_reaction("\u23f3")  # hourglass
@@ -1121,10 +1245,14 @@ async def on_message(message: discord.Message):
             except Exception:
                 pass
             await message.add_reaction("\u2705")
-            await message.reply(f"Compacted. Summary: {summary_len} chars.", mention_author=False)
+            await _reply_or_send(message, channel, f"Compacted. Summary: {summary_len} chars.", mention_author=False)
         except Exception as e:
-            await message.reply(f"Compact failed: {e}", mention_author=False)
+            await _reply_or_send(message, channel, f"Compact failed: {e}", mention_author=False)
         return
+
+    # /goal \u2014 forward directly as a Claude Code slash command
+    if _cmd.startswith("/goal"):
+        await message.add_reaction("\U0001f3af")  # dart
 
     if _cmd.startswith(".model"):
         parts = _cmd.split(None, 1)
@@ -1134,7 +1262,7 @@ async def on_message(message: discord.Message):
             override = state.get_model_override(ctx_key)
             pp = bridge.get_process(ctx_key)
             current = override or (pp.model if pp else "") or CLAUDE_MODEL or "(default from ~/.claude/settings.json)"
-            await message.reply(f"Model: `{current}`" + (" (override)" if override else ""), mention_author=False)
+            await _reply_or_send(message, channel, f"Model: `{current}`" + (" (override)" if override else ""), mention_author=False)
             return
         new_model = parts[1].strip()
         # Kill existing process so it respawns with new model
@@ -1143,7 +1271,77 @@ async def on_message(message: discord.Message):
             await pp.kill()
         # Persist model override so it survives reload
         state.set_model_override(ctx_key, new_model)
-        await message.reply(f"Model switched to `{new_model}`", mention_author=False)
+        await _reply_or_send(message, channel, f"Model switched to `{new_model}`", mention_author=False)
+        return
+
+    if _cmd.startswith(".fork"):
+        ctx_key = _resolve_ctx_key()
+        pp = bridge.get_process(ctx_key)
+        session_info = state.get_session(ctx_key)
+        source_session = (pp.session_id if pp else None) or (session_info["session_id"] if session_info else None)
+        if not source_session:
+            await _reply_or_send(message, channel, "No active session to fork.", mention_author=False)
+            return
+
+        # Parse optional name: .fork my-new-thread
+        fork_name = _cmd[5:].strip()
+        source_name = getattr(channel, "name", "session")
+        if not fork_name:
+            # Auto-name: append -2, -3, etc if fork already exists
+            base = source_name
+            fork_name = f"{base}-fork"
+
+        # Get the cwd from current session
+        source_cwd = (session_info["cwd"] if session_info else None) or str(docs_dir)
+
+        # Create a new thread
+        try:
+            # If in a thread, create sibling thread in parent channel
+            parent_ch = channel.parent if isinstance(channel, discord.Thread) else channel
+            # Create thread from a new message
+            fork_msg = await parent_ch.send(f"🍴 Forked from **{source_name}** (`{source_session[:8]}...`)")
+            new_thread = await fork_msg.create_thread(
+                name=fork_name, auto_archive_duration=10080
+            )
+
+            # Fork must launch from the SAME cwd as the original session,
+            # because --resume looks up session JSONLs per-project-directory.
+            new_ctx_key = f"thread:{new_thread.id}"
+
+            # Build system prompt for new thread
+            srv_name = guild.name if guild else ""
+            new_sys_prompt = build_thread_context_module(
+                project_name=fork_name,
+                project_cwd=source_cwd,
+                channel_name=fork_name,
+                server_name=srv_name,
+            )
+
+            new_pp = await bridge.get_or_create(
+                new_ctx_key, source_cwd, source_session, new_sys_prompt,
+                extra_args=["--fork-session"],
+            )
+
+            # Send a primer message so the fork knows what happened
+            primer = (
+                f"This session was forked from #{source_name}. "
+                f"You have the full conversation context from that thread. "
+                f"Continue from where we left off."
+            )
+            result = await new_pp.send(f"[System] {primer}")
+
+            if new_pp.session_id:
+                state.set_session(new_ctx_key, new_pp.session_id, source_cwd, fork_name)
+
+            await message.add_reaction("🍴")
+            await _reply_or_send(message, channel,
+                f"Forked → <#{new_thread.id}>\nSession: `{new_pp.session_id or '(pending)'}` "
+                f"(from `{source_session[:8]}...`)",
+                mention_author=False,
+            )
+        except Exception as e:
+            log.exception("Fork failed")
+            await _reply_or_send(message, channel, f"Fork failed: {e}", mention_author=False)
         return
 
     if _cmd == "reload":
@@ -1158,10 +1356,10 @@ async def on_message(message: discord.Message):
             )
             if r.returncode != 0:
                 err = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "unknown"
-                await message.reply(f"Reload aborted — bad syntax:\n```\n{err[:500]}\n```", mention_author=False)
+                await _reply_or_send(message, channel, f"Reload aborted — bad syntax:\n```\n{err[:500]}\n```", mention_author=False)
                 return
         except Exception as e:
-            await message.reply(f"Reload validation failed: {e}", mention_author=False)
+            await _reply_or_send(message, channel, f"Reload validation failed: {e}", mention_author=False)
             return
         await _force_reload_exit(message)
         return
@@ -1181,19 +1379,37 @@ async def on_message(message: discord.Message):
     if True:  # always fetch recent context
         try:
             recent: list[str] = []
-            async for hist_msg in channel.history(limit=50, before=message):
+            own_reacts = ""
+            async for hist_msg in channel.history(limit=100, before=message):
                 if hist_msg.author == client.user:
+                    own_reacts = format_reactions(hist_msg)
                     break  # stop at our last message
                 msg_text = (hist_msg.content or "").strip()
-                att_texts = [f"[attachment: {a.filename}]" for a in hist_msg.attachments] if hist_msg.attachments else []
-                combined = msg_text + ("\n" + " ".join(att_texts) if att_texts else "")
+                # Save attachments from context messages too (not just the triggering message)
+                if hist_msg.attachments:
+                    ctx_att_paths = await collect_message_attachments(hist_msg, ATT_DIR, log)
+                    att_texts = []
+                    for name, path in ctx_att_paths:
+                        att_texts.append(f"[attachment: {name}]")
+                    # Include saved paths so Claude knows where to find them
+                    att_line = " ".join(att_texts)
+                    att_saved = "\nSaved to:\n" + "\n".join(f"  {p}" for _, p in ctx_att_paths) if ctx_att_paths else ""
+                else:
+                    att_line = ""
+                    att_saved = ""
+                combined = msg_text + ("\n" + att_line + att_saved if att_line else "")
+                reacts = format_reactions(hist_msg)
+                if reacts:
+                    combined += f"\n  [reacts: {reacts}]"
                 if combined.strip():
                     author = hist_msg.author.display_name or hist_msg.author.name
                     recent.append(f"[{author}]\n{combined.strip()}")
-                if len(recent) >= 15:
+                if len(recent) >= 25:
                     break
-            if recent:
+            if recent or own_reacts:
                 recent.reverse()  # chronological order
+                if own_reacts:
+                    recent.insert(0, f"[reactions on your last reply: {own_reacts}]")
                 prev_context = "\n\n".join(recent)
         except Exception:
             pass
@@ -1215,6 +1431,7 @@ async def on_message(message: discord.Message):
         if tp:
             label, proj = tp
             cwd = proj["folder"]
+            Path(cwd).mkdir(parents=True, exist_ok=True)
             ctx_key = f"proj:{label}"
         else:
             # any thread auto-maps to {guild_docs_dir}/{thread_name}

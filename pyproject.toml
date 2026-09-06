@@ -8,10 +8,12 @@ dependencies = [
     "discord-ext-voice-recv>=0.5.2a179",
     "discord-py[voice]>=2.0",
     "faster-whisper>=1.2.1",
-    "kokoro>=0.9.4",
+    "kokoro>=0.9.4; sys_platform == 'win32'",
     "numpy>=2.4.2",
     "onnxruntime>=1.24.1",
+    "pillow>=11.0",
     "psutil>=7.2.2",
+    "pymupdf>=1.25",
     "python-dotenv>=1.2.1",
     "scipy>=1.17.0",
     "silero-vad>=6.2.0",
@@ -27,4 +29,4 @@ url = "https://download.pytorch.org/whl/cu124"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu124" }
+torch = { index = "pytorch-cu124", marker = "sys_platform == 'win32'" }

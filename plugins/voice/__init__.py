@@ -25,6 +25,17 @@ class VoicePlugin(Plugin):
         # the event loop at startup (transformers/ONNX imports take 10+ seconds)
         ctx.log.info("[Voice] Plugin registered (lazy init — will start on first join)")
 
+    def build_prompt_section(self, **kwargs) -> str:
+        return (
+            "Voice bot_actions are available when useful:\n"
+            '```bot_action\n{"action":"join_voice","channel":"general"}\n```\n'
+            '```bot_action\n{"action":"leave_voice"}\n```\n'
+            '```bot_action\n{"action":"play_audio","path":"C:/path/file.mp3","volume":0.8}\n```\n'
+            '```bot_action\n{"action":"play_url","url":"https://...","volume":0.5}\n```\n'
+            '```bot_action\n{"action":"stop_audio"}\n```\n'
+            '```bot_action\n{"action":"switch_voice","voice":"sam"}\n```'
+        )
+
     async def _ensure_manager(self) -> bool:
         """Lazy-init the voice manager on first use. Returns True if ready."""
         if self._manager is not None and self._manager._running:

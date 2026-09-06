@@ -24,13 +24,16 @@ def _fill_dynamic(prompt: str) -> str:
     return prompt
 
 
-def _resolve_includes(text: str) -> str:
-    """Resolve {{include:filename.md}} directives in prompt text."""
+def _resolve_includes(text: str, _depth: int = 0) -> str:
+    """Resolve {{include:filename.md}} directives in prompt text (recursive, max 5 deep)."""
+    if _depth > 5:
+        return text
     import re
     def _replace(m):
         inc_file = _PROMPTS_DIR / m.group(1)
         try:
-            return inc_file.read_text("utf-8").strip()
+            content = inc_file.read_text("utf-8").strip()
+            return _resolve_includes(content, _depth + 1)
         except Exception:
             return ""
     return re.sub(r"\{\{include:([^}]+)\}\}", _replace, text)
@@ -277,7 +280,7 @@ To set a reminder, include a ```reminder``` block:
   ```
 
 The "time" field MUST be an ISO 8601 timestamp with timezone offset (e.g. -07:00 for PDT, -08:00 for PST).
-When a reminder fires, it sends a Discord ping AND a Windows desktop notification.
+When a reminder fires, it sends a Discord ping AND a desktop notification.
 reminder blocks are stripped before sending â€" the user never sees them.
 
 == SIBLING BOTS ==

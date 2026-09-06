@@ -29,12 +29,19 @@ class _TurnState:
     def __init__(self):
         self._text_parts: list[str] = []  # accumulate deltas in a list (avoids O(N^2) string concat)
         self.last_text_snapshot = ""    # for delta tracking within a turn
+        self._thinking_parts: list[str] = []  # thinking summary blocks
+        self.last_thinking_snapshot = ""  # for delta tracking thinking summaries
         self.tools: list[str] = []
         self._seen_tool_ids: set[str] = set()  # deduplicate tool_use with partial messages
         self.result: dict | None = None
         self.done = asyncio.Event()
         self.on_text = None             # async fn(full_text_so_far)
         self.on_tool = None             # async fn(tool_description_str)
+        # model tracking — detects safeguard-triggered mid-turn model switches
+        # (e.g. fable -> opus fallback). observed_model = model of the first
+        # assistant message this turn; model_switched = (old, new) if it changes.
+        self.observed_model: str = ""
+        self.model_switched: tuple | None = None
         # token usage (updated from assistant.message.usage)
         self.input_tokens: int = 0
         self.cache_creation_tokens: int = 0
@@ -50,6 +57,17 @@ class _TurnState:
     def append_text(self, delta: str):
         """Append a delta without copying the full accumulated string."""
         self._text_parts.append(delta)
+
+    @property
+    def thinking(self) -> str:
+        """Join accumulated thinking summary parts."""
+        if len(self._thinking_parts) > 1:
+            self._thinking_parts = ["".join(self._thinking_parts)]
+        return self._thinking_parts[0] if self._thinking_parts else ""
+
+    def append_thinking(self, delta: str):
+        """Append a thinking summary delta."""
+        self._thinking_parts.append(delta)
 
 
 class _PersistentProcess:
@@ -114,7 +132,7 @@ class _PersistentProcess:
             stderr=asyncio.subprocess.PIPE,
             cwd=self.cwd,
             creationflags=CREATE_FLAGS,
-            limit=1024 * 1024,
+            limit=64 * 1024 * 1024,  # 64MB — images come as base64 in single JSON lines
             env=env,
         )
         self._alive = True
@@ -171,6 +189,20 @@ class _PersistentProcess:
                         sid = data.get("session_id")
                         if sid:
                             self.session_id = sid
+                    elif subtype in ("thinking_tokens", "status"):
+                        pass  # per-token / request-status chatter, not diagnostic
+                    else:
+                        # Don't drop non-init system messages silently — this is
+                        # where a safeguard/model-switch notice may arrive in
+                        # headless stream-json. Log the full payload so the next
+                        # real flag is captured with fidelity.
+                        try:
+                            log.warning(
+                                f"System msg (subtype={subtype}) for {self.ctx_key}: "
+                                f"{json.dumps(data)[:2000]}"
+                            )
+                        except Exception:
+                            pass
                     continue
 
                 if not turn:
@@ -215,6 +247,19 @@ class _PersistentProcess:
                         turn.input_tokens = usage.get("input_tokens", 0)
                         turn.cache_creation_tokens = usage.get("cache_creation_input_tokens", 0)
                         turn.cache_read_tokens = usage.get("cache_read_input_tokens", 0)
+                    # detect a mid-turn model switch (safeguard fallback, e.g.
+                    # fable -> opus). Compare observed-to-observed within the turn
+                    # so it's robust to alias-vs-full-id differences.
+                    msg_model = data.get("message", {}).get("model")
+                    if msg_model:
+                        if not turn.observed_model:
+                            turn.observed_model = msg_model
+                        elif msg_model != turn.observed_model and turn.model_switched is None:
+                            turn.model_switched = (turn.observed_model, msg_model)
+                            log.warning(
+                                f"MODEL SWITCH mid-turn for {self.ctx_key}: "
+                                f"{turn.observed_model} -> {msg_model}"
+                            )
                     for block in data.get("message", {}).get("content", []):
                         bt = block.get("type")
                         if bt == "text" and block.get("text"):
@@ -230,6 +275,14 @@ class _PersistentProcess:
                                     await turn.on_text(turn.text)
                                 except Exception:
                                     log.exception("on_text callback error")
+                        elif bt == "thinking" and block.get("thinking"):
+                            thinking_text = block["thinking"]
+                            if thinking_text.startswith(turn.last_thinking_snapshot):
+                                delta = thinking_text[len(turn.last_thinking_snapshot):]
+                            else:
+                                delta = thinking_text
+                            turn.last_thinking_snapshot = thinking_text
+                            turn.append_thinking(delta)
                         elif bt == "tool_use":
                             tool_id = block.get("id", "")
                             if tool_id and tool_id in turn._seen_tool_ids:
@@ -260,10 +313,13 @@ class _PersistentProcess:
                         "error": data.get("is_error", False),
                         "error_message": data.get("result", "") if data.get("is_error") else "",
                         "tools": turn.tools,
+                        "thinking": turn.thinking,
                         "input_tokens": turn.input_tokens,
                         "cache_creation_tokens": turn.cache_creation_tokens,
                         "cache_read_tokens": turn.cache_read_tokens,
                         "total_tokens": total_tokens,
+                        "observed_model": turn.observed_model,
+                        "model_switched": turn.model_switched,
                     }
                     turn.done.set()
 

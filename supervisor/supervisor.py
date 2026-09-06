@@ -81,13 +81,30 @@ def _start_codex(root: Path) -> subprocess.Popen:
 
 
 
+def _start_claire(root: Path) -> subprocess.Popen | None:
+    env_file = root / ".env.claire"
+    if not env_file.exists():
+        return None
+    # Check that a real token is set (not the placeholder)
+    for line in env_file.read_text().splitlines():
+        if line.startswith("DISCORD_TOKEN=") and "PASTE_TOKEN_HERE" not in line:
+            break
+    else:
+        return None
+    return _start_bot(
+        [_venv_python(root), str(root / "run_claire.py")], str(root),
+    )
+
+
 def _start_selfbot(root: Path) -> subprocess.Popen | None:
     script = root / "selfbot" / "self.py"
     if not script.exists():
         return None
     # selfbot uses its own venv (discord.py-self conflicts with discord.py)
     selfbot_dir = root / "selfbot"
-    python = _venv_python(selfbot_dir) if (selfbot_dir / ".venv").exists() else _venv_python(root)
+    if not (selfbot_dir / ".venv").exists():
+        return None
+    python = _venv_python(selfbot_dir)
     return _start_bot(
         [python, str(script)], str(root),
     )
@@ -122,6 +139,19 @@ def main():
             backoff_delay=BACKOFF_DELAY,
         ),
     }
+
+    claire_proc = _start_claire(root)
+    if claire_proc is not None:
+        bots["claire"] = BotProcess(
+            name="claire",
+            start_fn=lambda: _start_claire(root),
+            rapid_window=RAPID_WINDOW,
+            max_rapid_restarts=MAX_RAPID_RESTARTS,
+            restart_delay=RESTART_DELAY,
+            backoff_delay=BACKOFF_DELAY,
+            proc=claire_proc,
+            start_time=time.time(),
+        )
 
     sb_proc = _start_selfbot(root)
     if sb_proc is not None:

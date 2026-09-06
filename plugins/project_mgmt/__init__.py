@@ -100,19 +100,14 @@ class ProjectMgmtPlugin(Plugin):
     async def _full_restart(self, channel) -> dict:
         if self._ctx is None:
             return {"results": ["Full restart unavailable: plugin not initialized"]}
-        restart_script = self._ctx.project_root / "scripts" / "restart.ps1"
+        from shared.restart import restart_script_path, launch_full_restart
+        restart_script = restart_script_path(self._ctx.project_root)
         if not restart_script.exists():
-            return {"results": ["restart.ps1 not found"]}
+            return {"results": [f"{restart_script.name} not found"]}
 
         try:
             await channel.send("Full restart in progress...")
-            creationflags = int(self._ctx.extra.get("create_flags", 0))
-            creationflags |= int(getattr(subprocess, "DETACHED_PROCESS", 0))
-            subprocess.Popen(
-                ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(restart_script)],
-                creationflags=creationflags,
-                close_fds=True,
-            )
+            launch_full_restart(self._ctx.project_root)
             await asyncio.sleep(1)
             os._exit(0)
         except Exception as exc:

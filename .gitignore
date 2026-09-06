@@ -45,3 +45,9 @@ PLUGIN_PLAN.md
 nul
 .reload
 tmp_log_check.py
+
+# Local-only
+.env.*
+.venv/
+selfbot/
+*.win.bak

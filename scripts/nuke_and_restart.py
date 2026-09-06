@@ -25,7 +25,7 @@ MY_PID = os.getpid()
 MAINTENANCE_FLAG = os.path.join(_ROOT, "data", "maintenance.flag")
 
 # These are the EXACT script filenames that claudebot uses as entry points
-BOT_SCRIPTS = {"run.py", "bot.py", "codex_bot.py", "self.py", "supervisor.py"}
+BOT_SCRIPTS = {"run.py", "bot.py", "codex_bot.py", "self.py", "supervisor.py", "run_claire.py"}
 
 
 def _is_claudebot_process(proc: psutil.Process) -> bool:
