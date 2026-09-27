@@ -30,7 +30,7 @@ Violations of these rules have caused multi-hour outages requiring manual rescue
 - `claude/`: Claude Discord bot implementation
 - `codex/`: Codex Discord bot implementation
 - `shared/`: shared state/config/utility modules
-- `integrations/`: external integrations (council, suno, voice)
+- `integrations/`: external integrations (council, voice)
 - `supervisor/`: supervisor process lifecycle and health logic
 - `data/`: runtime state and generated artifacts
 - `logs/`: bot/supervisor logs

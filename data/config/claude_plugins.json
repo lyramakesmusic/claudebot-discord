@@ -1,6 +1,5 @@
 [
   "upload",
-  "suno",
   "voice",
   "image_gen",
   "council",
@@ -11,4 +10,3 @@
   "system_stats",
   "midjourney"
 ]
-

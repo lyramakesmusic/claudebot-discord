@@ -16,12 +16,6 @@ _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "data" / "prompts"
 
 def _fill_dynamic(prompt: str) -> str:
     """Replace dynamic placeholders in prompt templates."""
-    if "{{suno_model_info}}" in prompt:
-        try:
-            from integrations.suno import get_suno_model_info
-            prompt = prompt.replace("{{suno_model_info}}", get_suno_model_info())
-        except Exception:
-            prompt = prompt.replace("{{suno_model_info}}", "Omit for default.")
     return prompt
 
 
@@ -179,22 +173,6 @@ sushi on a spaceship, sushi in the rain — because MJ's default context for sus
 - `--sref random` gives a random style. Use multiple: `--sref 1234 5678`
 - To test a style unbiased, use a nonsense prompt like "IMG_0430.heic"
 - See `data/midjourney_srefs.jsonl` for saved sref/description combos
-
-== MUSIC GENERATION ==
-You can generate music using Suno AI (v5). Include this in your response:
-```bot_action
-{{"action": "generate_music", "style": "genre/style tags", "lyrics": "optional lyrics", "title": "song title"}}
-```
-- `style` (required): comma-separated genre/mood/vocal tags. Examples:
-  "dance pop, electro house, dark, sultry, rap-y"
-  "bittersweet synthpop, dance pop, intimate, hypnotic, crooning voice, driving backbeat, bass house"
-  "horrorcore, 2000s hiphop, obnoxious accent, fast polyrhythmic flow"
-  "artcore, j-core"
-  "lo-fi hip hop, chill, instrumental"
-- `lyrics` (optional): full lyrics with [Verse], [Chorus] etc. If omitted, generates instrumental.
-- `title` (optional): song title.
-- `model` (optional): custom model name. {{suno_model_info}}
-Music generation takes 1-3 minutes. The audio file (.mp3) will be attached to your reply.
 
 == VOICE CHANNELS ==
 You can join and leave Discord voice channels. When connected, users can talk to you
@@ -391,17 +369,6 @@ sushi on a spaceship, sushi in the rain — because MJ's default context for sus
 - `--sref random` gives a random style. Use multiple: `--sref 1234 5678`
 - To test a style unbiased, use a nonsense prompt like "IMG_0430.heic"
 - See `data/midjourney_srefs.jsonl` for saved sref/description combos
-
-== MUSIC GENERATION ==
-Generate music using Suno AI (v5):
-```bot_action
-{{"action": "generate_music", "style": "genre/style tags", "lyrics": "optional lyrics", "title": "song title"}}
-```
-- `style` (required): comma-separated genre/mood/vocal tags, e.g. "dance pop, electro house, dark, sultry"
-- `lyrics` (optional): with [Verse], [Chorus] markers. Omit for instrumental.
-- `title` (optional): song title.
-- `model` (optional): custom model name. {{suno_model_info}}
-Takes 1-3 minutes. Audio (.mp3) attached to your reply.
 
 == VOICE CHANNELS ==
 Join/leave Discord voice channels for voice conversation:

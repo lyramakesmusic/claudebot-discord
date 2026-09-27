@@ -95,8 +95,6 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 IMAGE_MODEL = "google/gemini-3.1-flash-image-preview"
 GENERATED_IMAGES_DIR = PROJECT_ROOT / "data" / "generated_images"
 
-# Suno music generation (see suno.py)
-from integrations.suno import enqueue_music
 
 
 def _is_auth_error(err: str) -> bool:
@@ -273,7 +271,6 @@ def _configure_actions():
         seed_project_cb=seed_project_module,
         bg_generate_image_cb=bg_generate_image_module,
         system_stats_fn=system_stats_module,
-        enqueue_music_fn=enqueue_music,
         call_gpt_fn=call_gpt,
         call_researcher_fn=call_researcher,
         split_message_fn=split_message,
@@ -357,7 +354,6 @@ async def _load_plugins():
         return
     default_names = [
         "upload",
-        "suno",
         "voice",
         "image_gen",
         "council",
@@ -871,11 +867,11 @@ async def _run_bridge_task(
         else:
             text_already_sent = False
 
-        # ── Now execute bot actions (music/image gen can take minutes) ──
+        # ── Now execute bot actions (image gen can take minutes) ──
         action_results = []
         reply_files: list[discord.File] = []
         pending_reload = False
-        universal = {"reload", "upload", "generate_image", "generate_midjourney", "generate_music", "join_voice", "leave_voice", "play_audio", "play_url", "stop_audio", "switch_voice", "call_gpt", "call_researcher"}
+        universal = {"reload", "upload", "generate_image", "generate_midjourney", "join_voice", "leave_voice", "play_audio", "play_url", "stop_audio", "switch_voice", "call_gpt", "call_researcher"}
         universal_actions = [a for a in actions if a.get("action") in universal]
         other_actions = [a for a in actions if a.get("action") not in universal]
         all_council_feedback: list[str] = []

@@ -55,7 +55,6 @@ claudebot/
 │   ├── forensics.py                 # Crash info capture (memory, CPU, locks)
 │   └── health.py                    # Heartbeat writer
 ├── integrations/                    # External service integrations
-│   ├── suno.py                      # Suno AI music generation
 │   ├── midjourney.py                # Midjourney image generation
 │   ├── council.py                   # GPT-5 critic + Gemini researcher (OpenRouter)
 │   └── voice/                       # Real-time voice conversations
@@ -66,7 +65,6 @@ claudebot/
 │       └── audio.py                 # Resampling (48kHz Discord <-> 16kHz STT)
 ├── plugins/                         # Plugin implementations
 │   ├── upload/                      # File upload to Discord
-│   ├── suno/                        # Music generation actions
 │   ├── image_gen/                   # Gemini image generation actions
 │   ├── midjourney/                  # Midjourney actions
 │   ├── council/                     # GPT/Gemini council actions
@@ -85,7 +83,6 @@ claudebot/
 │   │   ├── soul_calibration.md      # Personality prompt (included in both)
 │   │   └── codex_system.md          # Codex bot prompt
 │   ├── generated_images/            # Gemini + MJ outputs
-│   ├── generated_music/             # Suno outputs
 │   └── attachments/                 # Downloaded Discord attachments (auto-cleanup 24h)
 ├── scripts/                         # Operational utilities
 │   ├── nuke_and_restart.py          # Kill everything, clean locks, restart supervisor
@@ -221,7 +218,6 @@ These are extracted by regex (`shared/bot_actions.py`), stripped from the displa
 |--------|--------|-------------|
 | `generate_image` | image_gen | Gemini image via OpenRouter |
 | `generate_midjourney` | midjourney | Midjourney image generation |
-| `generate_music` | suno | Suno AI music generation |
 | `upload` | upload | Post file to Discord channel |
 | `create_project` | project_mgmt | Create thread + folder + session |
 | `reload` | project_mgmt | Syntax-check bot.py, then exit (supervisor restarts) |
@@ -343,9 +339,6 @@ OPENROUTER_API_KEY=sk-or-...
 ELEVENLABS_API_KEY=...
 ELEVENLABS_VOICE_ID=...
 
-# Suno — for music generation (optional)
-SUNO_COOKIE=your_suno_session_cookie
-
 # Voice channels (optional)
 VOICE_CHANNEL_IDS=123,456                      # comma-separated
 VOICE_ALLOWED_USER_IDS=789                     # comma-separated
@@ -443,10 +436,6 @@ The custom thread prompt at `data/prompts/claude_thread.md` is appended to every
 **Midjourney**: artistic, stylized, 1-3 min. Returns 4 images split from the generation grid.
 
 Both loop results back to Claude so it can see and comment on what was generated.
-
-### Music Generation (Suno)
-
-Cookie-based auth to Suno's API. Enqueues generation, polls for completion (~1-2 min), downloads MP3. Supports custom models and style tags.
 
 ### Voice Conversations
 

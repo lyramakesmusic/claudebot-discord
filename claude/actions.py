@@ -16,7 +16,6 @@ VoiceManager = None
 _seed_project = None
 _bg_generate_image = None
 _system_stats = None
-enqueue_music = None
 call_gpt = None
 call_researcher = None
 split_message = None
@@ -38,7 +37,6 @@ def configure(
     seed_project_cb,
     bg_generate_image_cb,
     system_stats_fn,
-    enqueue_music_fn,
     call_gpt_fn,
     call_researcher_fn,
     split_message_fn,
@@ -51,7 +49,7 @@ def configure(
     council_gpt_history: dict,
 ):
     global state, client, voice_manager, VoiceManager, _seed_project, _bg_generate_image, _system_stats
-    global enqueue_music, call_gpt, call_researcher, split_message, sanitize, log, _BOT_FILE
+    global call_gpt, call_researcher, split_message, sanitize, log, _BOT_FILE
     global PROJECT_ROOT, DOCUMENTS_DIR, CREATE_FLAGS, _council_gpt_history
     state = state_obj
     client = client_obj
@@ -60,7 +58,6 @@ def configure(
     _seed_project = seed_project_cb
     _bg_generate_image = bg_generate_image_cb
     _system_stats = system_stats_fn
-    enqueue_music = enqueue_music_fn
     call_gpt = call_gpt_fn
     call_researcher = call_researcher_fn
     split_message = split_message_fn
@@ -190,16 +187,6 @@ async def execute_bot_actions(
             caption = act.get("caption", "").strip()
             log.info(f"Generating image (async): {prompt[:80]}")
             asyncio.create_task(_bg_generate_image(channel, prompt, ref_images or None, caption, message.author.id))
-
-        elif action == "generate_music":
-            style = act.get("style", "").strip()
-            if not style:
-                results.append("(music generation skipped — no style given)")
-                continue
-            lyrics = act.get("lyrics", "").strip()
-            title = act.get("title", "").strip()
-            log.info(f"Generating music (async): style={style[:60]} lyrics={bool(lyrics)}")
-            enqueue_music(channel, style, lyrics, title)
 
         elif action == "join_voice":
             channel_ref = act.get("channel", "").strip()
