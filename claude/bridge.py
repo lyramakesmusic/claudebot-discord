@@ -42,6 +42,7 @@ class _TurnState:
         # assistant message this turn; model_switched = (old, new) if it changes.
         self.observed_model: str = ""
         self.model_switched: tuple | None = None
+        self.safeguard_flag: dict | None = None  # populated from model_refusal_fallback event
         # token usage (updated from assistant.message.usage)
         self.input_tokens: int = 0
         self.cache_creation_tokens: int = 0
@@ -119,6 +120,11 @@ class _PersistentProcess:
             cmd += ["--system-prompt-file", self._sys_prompt_file.name]
         if session_id:
             cmd += ["--resume", session_id]
+        # Extra CLI args from env (e.g. CLAUDE_EXTRA_ARGS="--tools ''")
+        env_extra = os.environ.get("CLAUDE_EXTRA_ARGS", "").strip()
+        if env_extra:
+            import shlex
+            cmd += shlex.split(env_extra)
         cmd += self.extra_args
 
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
@@ -191,6 +197,32 @@ class _PersistentProcess:
                             self.session_id = sid
                     elif subtype in ("thinking_tokens", "status"):
                         pass  # per-token / request-status chatter, not diagnostic
+                    elif subtype == "model_refusal_fallback":
+                        # Safeguard flag fired — capture the full event
+                        flag_info = {
+                            "category": data.get("api_refusal_category", "unknown"),
+                            "explanation": data.get("api_refusal_explanation"),
+                            "original_model": data.get("original_model", ""),
+                            "fallback_model": data.get("fallback_model", ""),
+                            "trigger": data.get("trigger", ""),
+                            "scope": data.get("scope", ""),
+                            "refused_uuid": data.get("refused_user_message_uuid", ""),
+                            "request_id": data.get("request_id", ""),
+                        }
+                        log.warning(
+                            f"SAFEGUARD FLAG for {self.ctx_key}: "
+                            f"category={flag_info['category']} "
+                            f"{flag_info['original_model']} -> {flag_info['fallback_model']}"
+                        )
+                        if turn:
+                            turn.safeguard_flag = flag_info
+                        try:
+                            log.warning(
+                                f"System msg (subtype={subtype}) for {self.ctx_key}: "
+                                f"{json.dumps(data)[:2000]}"
+                            )
+                        except Exception:
+                            pass
                     else:
                         # Don't drop non-init system messages silently — this is
                         # where a safeguard/model-switch notice may arrive in
@@ -320,6 +352,7 @@ class _PersistentProcess:
                         "total_tokens": total_tokens,
                         "observed_model": turn.observed_model,
                         "model_switched": turn.model_switched,
+                        "safeguard_flag": turn.safeguard_flag,
                     }
                     turn.done.set()
 
@@ -460,6 +493,106 @@ class _PersistentProcess:
         if stderr_task and not stderr_task.done():
             stderr_task.cancel()
         log.info(f"Killed persistent process for {self.ctx_key}")
+
+
+def _is_tool_result_row(row: dict) -> bool:
+    """True if a transcript row is a user row carrying tool_result blocks."""
+    if row.get("type") != "user":
+        return False
+    content = row.get("message", {}).get("content")
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+    )
+
+
+def rewind_transcript(cwd: str, session_id: str, refused_uuid: str = "") -> dict:
+    """Truncate a session transcript to just before the flagged step.
+
+    Granular: tool calls are their own units. If the refused message is a
+    tool_result row, the cut lands on its PARENT assistant message (the tool
+    call that caused it) — a 200-call agent loop only loses the bad step, not
+    the whole chain. If the refused message is the actual user prompt, the cut
+    lands there (full rewind of the turn).
+
+    Returns {"ok": True, "mode": "prompt"|"step", ...} so the caller knows
+    whether to resend the original prompt or a continuation nudge, or
+    {"ok": False, "reason": ...}. The original transcript is backed up first.
+    """
+    if not session_id:
+        return {"ok": False, "reason": "no session id"}
+    projects = Path.home() / ".claude" / "projects"
+    candidates = list(projects.glob(f"*/{session_id}.jsonl"))
+    if not candidates:
+        return {"ok": False, "reason": f"transcript not found for session {session_id}"}
+    path = max(candidates, key=lambda p: p.stat().st_mtime)
+    try:
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception as e:
+        return {"ok": False, "reason": f"read failed: {e}"}
+
+    rows = []  # (parsed_obj_or_None, raw_line)
+    uuids = {}
+    for i, line in enumerate(raw_lines):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            obj = None
+        rows.append((obj, line))
+        if obj and obj.get("uuid"):
+            uuids[obj["uuid"]] = i
+
+    cut_idx = None
+    cut_uuid = ""
+    mode = None
+    if refused_uuid and refused_uuid in uuids:
+        i = uuids[refused_uuid]
+        row = rows[i][0]
+        if _is_tool_result_row(row):
+            # the flagged content is a tool result — rewind the tool CALL that
+            # produced it (its parent assistant message), not the whole chain
+            parent = row.get("parentUuid")
+            cut_idx = uuids.get(parent, i)
+            mode = "step"
+            cut_uuid = rows[cut_idx][0].get("uuid", "") if rows[cut_idx][0] else ""
+        else:
+            # the user prompt itself was refused — rewind the whole turn
+            cut_idx = i
+            mode = "prompt"
+            cut_uuid = refused_uuid
+    else:
+        # no uuid (model-switch-only detection): redo just the final step
+        for i in range(len(rows) - 1, -1, -1):
+            if rows[i][0] and rows[i][0].get("type") == "assistant":
+                cut_idx = i
+                mode = "step"
+                cut_uuid = rows[i][0].get("uuid", "")
+                break
+        if cut_idx is None:
+            # no assistant rows at all — cut at the last real user message
+            for i in range(len(rows) - 1, -1, -1):
+                obj = rows[i][0]
+                if obj and obj.get("type") == "user" and not _is_tool_result_row(obj):
+                    cut_idx = i
+                    mode = "prompt"
+                    cut_uuid = obj.get("uuid", "")
+                    break
+    if cut_idx is None:
+        return {"ok": False, "reason": "nothing to rewind to", "path": str(path)}
+
+    removed = len(raw_lines) - cut_idx
+    backup = path.with_suffix(f".prerewind-{int(_time.time())}.jsonl")
+    try:
+        backup.write_text("\n".join(raw_lines) + "\n", encoding="utf-8")
+        path.write_text("".join(line + "\n" for line in raw_lines[:cut_idx]), encoding="utf-8")
+    except Exception as e:
+        return {"ok": False, "reason": f"write failed: {e}", "path": str(path)}
+    if log:
+        log.warning(
+            f"Rewound transcript {path.name} ({mode}): removed {removed} line(s) "
+            f"from uuid {cut_uuid or '?'} (backup: {backup.name})"
+        )
+    return {"ok": True, "mode": mode, "path": str(path), "removed": removed,
+            "cut_uuid": cut_uuid, "backup": str(backup)}
 
 
 class ClaudeBridge:

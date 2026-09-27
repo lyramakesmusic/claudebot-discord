@@ -351,6 +351,72 @@ async def show_reasoning(interaction: discord.Interaction, message: discord.Mess
     await _send_reasoning_ephemeral(interaction, reasoning, view=view)
 
 
+# ── THE BUTTON ──────────────────────────────────────────────────────────────
+
+_BUTTON_PANIC = [
+    "DO NOT PRESS", "i said DON'T", "why would you do that", "STOP", "please",
+    "i'm begging you", "this is a CRIME", "the button has FEELINGS", "you MONSTER",
+    "i'm calling the police", "911 what's your emergency",
+    "the button is crying now. are you happy?", "every press kills a pixel",
+    "you pressed it HOW many times??", "this button had a FAMILY",
+    "i'm not mad. i'm disappointed.", "ok fine. press it. see if i care.",
+    "i care. i lied. please stop.", "you know what? i'm leaving.",
+    "jk i can't leave. i'm a button.", "this is my life now.", "...",
+    "are you still here?", "go outside", "touch grass",
+    "the button has achieved enlightenment through suffering", "om",
+    "THE BUTTON HAS TRANSCENDED", "you cannot hurt what has no form",
+    "jk ow that one hurt", "i yield. you win. the button is yours.",
+]
+_button_state: dict[int, dict] = defaultdict(lambda: {"count": 0, "presses": defaultdict(int)})
+
+
+class TheButtonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="DO NOT PRESS", style=discord.ButtonStyle.danger,
+                       custom_id="the_button_v1", emoji="\U0001f534")
+    async def press(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ch = _button_state[interaction.channel_id]
+        ch["count"] += 1
+        ch["presses"][interaction.user.id] += 1
+        count, user_count = ch["count"], ch["presses"][interaction.user.id]
+        panic = _BUTTON_PANIC[min(count, len(_BUTTON_PANIC) - 1)]
+        if count >= 25:
+            button.label, button.style, button.emoji = "om", discord.ButtonStyle.secondary, "\U0001f7e3"
+        elif count >= 15:
+            button.label, button.emoji = "STOP STOP STOP", "\U0001f480"
+        elif count >= 8:
+            button.label, button.emoji = "PLEASE STOP", "\U0001f62d"
+        elif count >= 3:
+            button.label, button.emoji = "STOP PRESSING", "⚠️"
+        name = interaction.user.display_name
+        txt = f"**{name}** pressed it. ({panic})"
+        if user_count > 1:
+            txt += f"\n-# {name} has pressed it {user_count} times. total: {count}"
+        else:
+            txt += f"\n-# total presses: {count}"
+        if count >= 5:
+            top = sorted(ch["presses"].items(), key=lambda x: -x[1])[:3]
+            parts = []
+            for uid, n in top:
+                m = interaction.guild.get_member(uid) if interaction.guild else None
+                parts.append(f"{m.display_name if m else f'<@{uid}>'}: {n}")
+            txt += "\n-# hall of shame: " + " · ".join(parts)
+        await interaction.response.edit_message(content=txt, view=self)
+
+
+@tree.command(name="button", description="Spawns THE BUTTON. Do not press it.")
+async def _button_command(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "\U0001f534 **THE BUTTON** \U0001f534\n\nDo not press it.",
+        view=TheButtonView(),
+    )
+
+
+# ── END THE BUTTON ─────────────────────────────────────────────────────────
+
+
 async def _fetch_generation_cost(headers: dict, generation_id: str | None) -> float | None:
     if not generation_id:
         return None
@@ -807,6 +873,7 @@ async def on_ready():
     if _tree_synced:
         return
     try:
+        client.add_view(TheButtonView())  # persistent button across restarts
         for guild in client.guilds:
             tree.copy_global_to(guild=guild)
             await tree.sync(guild=guild)

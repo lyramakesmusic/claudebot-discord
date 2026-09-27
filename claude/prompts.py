@@ -1,5 +1,6 @@
 """Prompt builders for Claude bot."""
 
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -63,6 +64,13 @@ def build_system_context(projects: dict, channel_name: str = "claude",
                           guild_id: int = None) -> str:
     """Build the context string prepended to orchestrator prompts.
     Gives Claude knowledge about the bot's project management capabilities."""
+    # Bare mode: minimal/empty system prompt (e.g. opus3 instance)
+    bare = os.environ.get("BARE_MODE", "").strip()
+    if bare:
+        bare_prompt_path = os.environ.get("BARE_PROMPT_FILE", "")
+        if bare_prompt_path and Path(bare_prompt_path).exists():
+            return Path(bare_prompt_path).read_text(encoding="utf-8")
+        return ""
     proj_list = ""
     if projects:
         lines = []
@@ -307,6 +315,9 @@ def build_thread_context(project_name: str = "", project_cwd: str = "",
                          channel_name: str = "", server_name: str = "") -> str:
     """Minimal system context for thread/project sessions.
     Gives them upload + reload capabilities without orchestrator-specific stuff."""
+    bare = os.environ.get("BARE_MODE", "").strip()
+    if bare:
+        return os.environ.get("BARE_PROMPT_FILE", "") and Path(os.environ["BARE_PROMPT_FILE"]).read_text(encoding="utf-8") if Path(os.environ.get("BARE_PROMPT_FILE", "")).exists() else ""
     bot_file = str(_bot_file)
     custom_prompt_path = str(_PROMPTS_DIR / "claude_thread.md")
     _custom = _load_custom_prompt("claude_thread.md")

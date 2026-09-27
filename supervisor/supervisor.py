@@ -64,6 +64,8 @@ def _start_bot(cmd: list[str], cwd: str) -> subprocess.Popen:
     """
     return subprocess.Popen(
         cmd, cwd=cwd, creationflags=CREATE_FLAGS,
+        # pythonw can provide an unusable inherited stdout handle.
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
 
@@ -77,6 +79,12 @@ def _start_claude(root: Path) -> subprocess.Popen:
 def _start_codex(root: Path) -> subprocess.Popen:
     return _start_bot(
         [_venv_python(root), str(root / "codex_bot.py")], str(root),
+    )
+
+
+def _start_opal(root: Path) -> subprocess.Popen:
+    return _start_bot(
+        [_venv_python(root), str(root / "run_opal.py")], str(root),
     )
 
 
@@ -138,6 +146,14 @@ def main():
             restart_delay=RESTART_DELAY,
             backoff_delay=BACKOFF_DELAY,
         ),
+        "opal": BotProcess(
+            name="opal",
+            start_fn=lambda: _start_opal(root),
+            rapid_window=RAPID_WINDOW,
+            max_rapid_restarts=MAX_RAPID_RESTARTS,
+            restart_delay=RESTART_DELAY,
+            backoff_delay=BACKOFF_DELAY,
+        ),
     }
 
     claire_proc = _start_claire(root)
@@ -176,6 +192,16 @@ def main():
             time.sleep(POLL_INTERVAL)
 
             for name, bp in bots.items():
+                # If paused by sentinel and not running, skip entirely
+                sentinel = root / "data" / f"{name.removesuffix('bot')}_paused.sentinel"
+                if sentinel.exists() and not bp.is_alive():
+                    continue
+
+                if bp.proc is None and not bp.disabled:
+                    bp.start()
+                    log.info("%s resumed (pid=%s)", name, bp.pid)
+                    continue
+
                 ret = bp.poll()
                 if ret is None:
                     continue
@@ -198,6 +224,14 @@ def main():
                     name, ret, bp.pid, uptime,
                 )
                 capture_crash_info(name, bp.pid, ret, root, uptime=uptime)
+
+                # Check for pause sentinel (e.g. stop_codex.py for updates)
+                sentinel = root / "data" / f"{name.removesuffix('bot')}_paused.sentinel"
+                if sentinel.exists():
+                    log.info("%s paused by sentinel %s — skipping restart", name, sentinel)
+                    bp.proc = None  # clear so we re-check next poll
+                    continue
+
                 bp.register_crash_backoff()
                 bp.start()
                 log.info("%s restarted (pid=%s)", name, bp.pid)

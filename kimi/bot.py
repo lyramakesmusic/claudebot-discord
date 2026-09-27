@@ -22,6 +22,7 @@ from datetime import datetime
 
 import discord
 from dotenv import load_dotenv
+from claude.attachments import collect_message_attachments
 from kimi.actions import configure as configure_actions
 from kimi.actions import execute_bot_actions as dispatch_bot_actions
 from kimi.bridge import KimiBridge
@@ -202,6 +203,12 @@ async def on_message(message: discord.Message):
                 if hist_msg.author == client.user:
                     break  # stop at our last message
                 msg_text = (hist_msg.content or "").strip()
+                if hist_msg.attachments:
+                    ctx_att_paths = await collect_message_attachments(hist_msg, ATT_DIR, log)
+                    if ctx_att_paths:
+                        att_notes = " ".join(f"[attachment: {name}]" for name, _ in ctx_att_paths)
+                        saved_paths = "\n".join(f"  {path}" for _, path in ctx_att_paths)
+                        msg_text += f"\n{att_notes}\nSaved to:\n{saved_paths}"
                 if msg_text:
                     author = hist_msg.author.display_name or hist_msg.author.name
                     recent.append(f"[{author}]\n{msg_text}")
@@ -355,7 +362,8 @@ async def on_message(message: discord.Message):
 
     # ── If busy, queue + inject ──────────────────────────────
     if pp.is_busy:
-        await _queue_injected_input(ctx_key, user_msg, cleanup_paths)
+        queued = await _queue_injected_input(ctx_key, user_msg, cleanup_paths)
+        log.info(f"Interrupt queued for {ctx_key}: message={message.id} pending={queued}")
         await pp.interrupt()
         return
 
@@ -424,26 +432,38 @@ async def on_message(message: discord.Message):
             if pp.session_id:
                 state.set_session(ctx_key, pp.session_id, cwd, label)
 
+            if result.get("interrupted"):
+                injected = await _pop_injected_inputs(ctx_key)
+                cleanup_paths.extend(p for item in injected for p in item.get("attachments", []))
+                if not injected:
+                    break  # Explicit stop, without a replacement message.
+                next_prompt = "\n\n".join(item["prompt"] for item in injected)
+                resume_id = pp.session_id
+                await bridge.kill_process(ctx_key)
+                pp = await bridge.get_or_create(
+                    ctx_key, cwd, resume_id, sys_prompt, model=KIMI_MODEL,
+                    extra_env={"PYTHONIOENCODING": "utf-8"},
+                )
+                log.info(f"Resumed {ctx_key} session={resume_id} with {len(injected)} queued messages")
+                continue
+
             log.info(f"turn finished: error={result['error']} text_len={len(result.get('text',''))} "
                      f"tools={len(result.get('tools',[]))} current_text_len={len(current_text)} "
                      f"sent_text_len={sent_text_len}")
 
             if result["error"]:
                 err = result.get("error_message") or "Unknown error"
-                await message.reply(f"Error:\n```\n{err[:1800]}\n```", mention_author=False)
-
-                # Process died? Kill and retry without session (fresh)
+                # Recover a dead CLI in the same session before surfacing an error.
                 if not pp.alive:
                     await bridge.kill_process(ctx_key)
-                    state.clear_session(ctx_key)
-                    log.info(f"Dead process for {ctx_key}, retrying fresh")
-                    await channel.send("Process crashed, retrying...")
+                    resume_id = pp.session_id
+                    log.info(f"Dead process for {ctx_key}, resuming {resume_id}")
 
                     current_text = ""
                     sent_text_len = 0
 
                     pp = await bridge.get_or_create(
-                        ctx_key, cwd, None, sys_prompt, model=KIMI_MODEL,
+                        ctx_key, cwd, resume_id, sys_prompt, model=KIMI_MODEL,
                         extra_env={"PYTHONIOENCODING": "utf-8"},
                     )
                     result = await pp.send(
@@ -456,6 +476,7 @@ async def on_message(message: discord.Message):
                         await channel.send(f"Retry failed:\n```\n{err2[:1800]}\n```")
                         return
                 else:
+                    await message.reply(f"Error:\n```\n{err[:1800]}\n```", mention_author=False)
                     return
 
             text = current_text or result.get("text", "")

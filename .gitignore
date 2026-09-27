@@ -51,3 +51,6 @@ tmp_log_check.py
 .venv/
 selfbot/
 *.win.bak
+
+# Nested repos
+jev-bot/

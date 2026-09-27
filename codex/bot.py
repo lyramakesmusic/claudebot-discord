@@ -625,6 +625,17 @@ async def on_message(message: discord.Message):
         except Exception as e:
             log.warning(f"Failed to send tool status: {e}")
 
+    uploaded_images = set()
+
+    async def on_image(path: str):
+        normalized = str(Path(path).resolve()).casefold()
+        if normalized in uploaded_images:
+            return
+        with discord.File(path) as attachment:
+            await channel.send(file=attachment)
+        uploaded_images.add(normalized)
+        log.info("Auto-uploaded generated image: %s", path)
+
     async def _speak_thread_reply(text_to_speak: str):
         if not text_to_speak.strip() or not voice_manager:
             return
@@ -649,7 +660,7 @@ async def on_message(message: discord.Message):
                 result = await bridge.send_turn(
                     ctx_key, cwd, next_prompt,
                     system_prompt=sys_prompt,
-                    on_text=on_text, on_tool=on_tool,
+                    on_text=on_text, on_tool=on_tool, on_image=on_image,
                 )
             except Exception as e:
                 log.exception("Codex bridge error")
@@ -673,6 +684,11 @@ async def on_message(message: discord.Message):
             text = current_text or result.get("text", "")
             if text:
                 cleaned_text, actions = extract_bot_actions(text)
+                actions = [a for a in actions if not (
+                    a.get("action") == "upload" and
+                    str(Path(a.get("path", "")).expanduser().resolve()).casefold()
+                    in uploaded_images
+                )]
 
                 if sent_text_len > 0:
                     unsent_raw = current_text[sent_text_len:] if sent_text_len < len(current_text) else ""

@@ -10,6 +10,7 @@ import json
 import os
 import signal
 import subprocess
+import uuid
 import time as _time
 from pathlib import Path
 
@@ -78,9 +79,12 @@ class _PersistentProcess:
         self._send_lock = asyncio.Lock()
         self._first_msg = True
         self._created_at: float = 0.0
+        self._interrupted = False
+        self._kill_lock = asyncio.Lock()
 
     async def start(self, session_id: str = None):
         """Spawn the kimi process."""
+        self.session_id = session_id or str(uuid.uuid4())
         cmd = [
             KIMI_CMD,
             "--print",
@@ -92,8 +96,7 @@ class _PersistentProcess:
         model = self.model or KIMI_MODEL
         if model:
             cmd += ["--model", model]
-        if session_id:
-            cmd += ["--session", session_id]
+        cmd += ["--session", self.session_id]
 
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
@@ -171,6 +174,14 @@ class _PersistentProcess:
                 if role == "assistant":
                     tool_calls = data.get("tool_calls")
                     content = data.get("content", "")
+                    if isinstance(content, list):
+                        # Kimi's structured output separates visible text from thinking.
+                        content = "".join(
+                            part["text"] for part in content
+                            if isinstance(part, dict)
+                            and part.get("type") == "text"
+                            and isinstance(part.get("text"), str)
+                        )
 
                     if tool_calls:
                         # Assistant is making tool calls — extract tool descriptions
@@ -201,9 +212,6 @@ class _PersistentProcess:
                                     log.exception("on_text callback error")
 
                         # Read session ID from kimi.json (not in stream output)
-                        sid = _read_session_id(self.cwd)
-                        if sid:
-                            self.session_id = sid
 
                         turn.result = {
                             "text": turn.text,
@@ -276,6 +284,12 @@ class _PersistentProcess:
 
             await turn.done.wait()
 
+            if self._interrupted:
+                await self.kill()
+                self._turn = None
+                return {"text": "", "session_id": self.session_id,
+                        "error": False, "interrupted": True, "tools": turn.tools}
+
             self._turn = None
             return turn.result or {
                 "text": turn.text, "session_id": self.session_id, "cost_usd": 0,
@@ -302,19 +316,29 @@ class _PersistentProcess:
         return self._alive and self.proc is not None and self.proc.returncode is None
 
     async def interrupt(self):
-        """Send CTRL+C to interrupt current turn."""
-        if self.proc and self.proc.returncode is None and self._turn:
-            if os.name == "nt":
-                os.kill(self.proc.pid, signal.CTRL_BREAK_EVENT)
-            else:
-                self.proc.send_signal(signal.SIGINT)
+        """Stop this run; the caller resumes the saved session with new input."""
+        self._interrupted = True
+        await self.kill()
 
     async def kill(self):
+        async with self._kill_lock:
+            await self._kill()
+
+    async def _kill(self):
         """Terminate the process."""
         self._alive = False
         if self.proc and self.proc.returncode is None:
             try:
-                self.proc.kill()
+                if os.name == "nt":
+                    killer = await asyncio.create_subprocess_exec(
+                        "taskkill", "/PID", str(self.proc.pid), "/T", "/F",
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                    await killer.wait()
+                if self.proc.returncode is None:
+                    self.proc.kill()
             except Exception:
                 pass
             try:
@@ -326,6 +350,11 @@ class _PersistentProcess:
         stderr_task = getattr(self, "_stderr_task", None)
         if stderr_task and not stderr_task.done():
             stderr_task.cancel()
+        tasks = [t for t in (self._reader_task, stderr_task) if t is not None]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if self._turn:
+            self._turn.done.set()
         log.info(f"Killed kimi process for {self.ctx_key}")
 
 
@@ -341,9 +370,12 @@ class KimiBridge:
         extra_env: dict[str, str] = None,
     ) -> _PersistentProcess:
         pp = self._procs.get(ctx_key)
-        if pp and pp.alive:
+        if pp and pp.is_busy:
             return pp
         if pp:
+            # The CLI snapshots OAuth credentials at startup. Resume the saved
+            # conversation in a fresh CLI so idle sessions don't retain expired auth.
+            session_id = pp.session_id or session_id
             await pp.kill()
         pp = _PersistentProcess(ctx_key, cwd, system_prompt, model=model,
                                 extra_env=extra_env)

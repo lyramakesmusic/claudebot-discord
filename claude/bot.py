@@ -32,6 +32,7 @@ from claude.contexts import configure as configure_contexts_module
 from claude.contexts import try_handle_context_command as try_handle_context_command_module
 from claude.bridge import ClaudeBridge as BridgeClaudeBridge
 from claude.bridge import configure as configure_bridge_module
+from claude.bridge import rewind_transcript as rewind_transcript_module
 from claude.image_gen import bg_generate_image as bg_generate_image_module
 from claude.image_gen import configure as configure_image_gen_module
 from claude.actions import configure as configure_actions_module
@@ -669,20 +670,93 @@ async def _run_bridge_task(
 
     log.info(f"bridge.send finished: error={result['error']} text_len={len(result.get('text',''))} tools={len(result.get('tools',[]))}")
 
-    # ── Surface safeguard-triggered model switches (e.g. fable -> opus) ──
-    # The model can be auto-swapped mid-turn if a safeguard flags the message.
-    # Don't let that happen silently — tell the channel it wasn't the requested model.
-    _switch = result.get("model_switched")
-    if _switch:
+    # ── Safeguard retry loop ─────────────────────────────────────
+    # A classifier flag mid-turn silently swaps the model (fable -> opus).
+    # Rewind the transcript to just before the flagged step — granular, so a
+    # 200-call agent loop only loses the step that tripped the classifier —
+    # respawn pinned to the original model, and retry (max 3 attempts).
+    # On give-up: leave the process ALIVE (generation already stopped) and
+    # post the classic warning so the model can be switched + retried manually.
+    MAX_SAFEGUARD_RETRIES = 3
+    _sg_attempt = 0
+    while result.get("safeguard_flag") or result.get("model_switched"):
+        _sg_attempt += 1
+        _flag = result.get("safeguard_flag") or {}
+        _switch = result.get("model_switched")
+        _orig = _flag.get("original_model") or (_switch[0] if _switch else "?")
+        _fallback = _flag.get("fallback_model") or (_switch[1] if _switch else "?")
+        _cat = _flag.get("category", "unknown")
+        _sid = pp.session_id or session_id
+
+        if _sg_attempt > MAX_SAFEGUARD_RETRIES:
+            # give up — classic warning, process untouched and still talkable
+            try:
+                await channel.send(
+                    f"⚠️ **safeguard flagged: {_cat}**\n"
+                    f"model `{_orig}` fell back to `{_fallback}`\n"
+                    f"session paused, run `.model {_orig}` and retry"
+                )
+            except Exception:
+                pass
+            return
+
+        # rewind BEFORE killing anything — if we can't rewind, leave the
+        # live process alone and hand over instead
+        rewind = (
+            rewind_transcript_module(cwd, _sid, _flag.get("refused_uuid", ""))
+            if _sid else {"ok": False, "reason": "no session id"}
+        )
+        log.warning(f"safeguard retry {_sg_attempt}/{MAX_SAFEGUARD_RETRIES} for {ctx_key}: rewind={rewind}")
+        if not rewind.get("ok"):
+            try:
+                await channel.send(
+                    f"⚠️ **safeguard flagged: {_cat}**\n"
+                    f"model `{_orig}` fell back to `{_fallback}`\n"
+                    f"auto-rewind failed ({rewind.get('reason')}) — "
+                    f"session paused, run `.model {_orig}` and retry"
+                )
+            except Exception:
+                pass
+            return
+
+        # warn — classic detailed format from the 2nd retry onward
+        _what = "flagged prompt" if rewind.get("mode") == "prompt" else "last step"
         try:
-            _from, _to = _switch
-            await channel.send(
-                f"⚠️ heads up — a safeguard flagged this one mid-generation and "
-                f"auto-switched models (`{_from}` → `{_to}`). this reply finished on "
-                f"the fallback model, not the one you set."
-            )
+            if _sg_attempt >= 2:
+                await channel.send(
+                    f"⚠️ **safeguard flagged: {_cat}**\n"
+                    f"model `{_orig}` fell back to `{_fallback}`\n"
+                    f"rewound {_what}, retrying on `{_orig}` ({_sg_attempt}/{MAX_SAFEGUARD_RETRIES})"
+                )
+            else:
+                await channel.send(
+                    f"⚠️ **safeguard flagged: {_cat}** — rewound {_what}, "
+                    f"retrying on `{_orig}` ({_sg_attempt}/{MAX_SAFEGUARD_RETRIES})"
+                )
         except Exception:
             pass
+
+        # reset stream tracking — partial fallback output above is discarded
+        current_text = ""
+        sent_text_len = 0
+
+        await bridge.kill_process(ctx_key)
+        pp = await bridge.get_or_create(
+            ctx_key, cwd, _sid, sys_prompt, model=_orig if _orig != "?" else ""
+        )
+        if rewind.get("mode") == "prompt":
+            _retry_msg = user_msg
+        else:
+            # granular rewind: the prompt + prior steps are already in the
+            # transcript — nudge continuation instead of resending the prompt
+            _retry_msg = (
+                "[System] A safeguard fallback interrupted the previous step; the "
+                "partial fallback-model output was rewound. Continue the task from "
+                "where the transcript leaves off."
+            )
+        result = await pp.send(_retry_msg, on_text=on_text, on_tool=on_tool)
+        if pp.session_id:
+            state.set_session(ctx_key, pp.session_id, cwd, label)
 
     # typing stays alive until we've finished sending everything
     pending_reload = False
@@ -1239,13 +1313,46 @@ async def on_message(message: discord.Message):
         await message.add_reaction("\u23f3")  # hourglass
         try:
             result = await pp.send("/compact")
-            summary_len = len(result.get("text", ""))
+            # /compact is a local command: no assistant text. The summary is written to the
+            # session jsonl as a user message flagged isCompactSummary — read the last one.
+            summary_len = 0
+            summary_text = ""
+            try:
+                sid = pp.session_id
+                files = list((Path.home() / ".claude" / "projects").glob(f"*/{sid}.jsonl")) if sid else []
+                if files:
+                    for line in reversed(files[0].read_text(encoding="utf-8", errors="replace").splitlines()):
+                        if '"isCompactSummary":true' in line.replace(" ", ""):
+                            c = json.loads(line).get("message", {}).get("content", "")
+                            summary_text = c if isinstance(c, str) else "".join(b.get("text", "") for b in c if isinstance(b, dict))
+                            summary_len = len(summary_text)
+                            break
+            except Exception as e:
+                log.warning("compact summary lookup failed: %s", e)
             try:
                 await message.remove_reaction("\u23f3", client.user)
             except Exception:
                 pass
             await message.add_reaction("\u2705")
-            await _reply_or_send(message, channel, f"Compacted. Summary: {summary_len} chars.", mention_author=False)
+            reply = f"Compacted. Summary: {summary_len} chars."
+            if summary_text:
+                # skip the harness preamble ("This session is being continued...") and quote the start
+                body = summary_text
+                i = body.find("Summary:")
+                if 0 <= i < 400:
+                    body = body[i + len("Summary:"):]
+                body = body.strip()
+                budget = 1950 - len(reply)
+                quoted, used = [], 0
+                for ln in body.splitlines():
+                    q = "> " + ln if ln.strip() else "> ​"
+                    if used + len(q) + 1 > budget - 4:
+                        quoted.append("> …")
+                        break
+                    quoted.append(q)
+                    used += len(q) + 1
+                reply += "\n" + "\n".join(quoted)
+            await _reply_or_send(message, channel, reply, mention_author=False)
         except Exception as e:
             await _reply_or_send(message, channel, f"Compact failed: {e}", mention_author=False)
         return

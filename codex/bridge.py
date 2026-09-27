@@ -1,6 +1,8 @@
 """Codex app-server bridge (WebSocket transport)."""
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import re
@@ -39,6 +41,8 @@ class _TurnState:
         self.turn_id: str | None = None
         self.on_text = None
         self.on_tool = None
+        self.on_image = None
+        self._seen_image_ids: set[str] = set()
 
 
 def _clean_shell_cmd(item: dict) -> str:
@@ -319,6 +323,26 @@ class CodexAppServer:
             item = params.get("item", {})
             item_type = item.get("type", "").lower()
             item_id = item.get("id", "")
+            if (turn and item_type == "imagegeneration"
+                    and item.get("status") == "completed"
+                    and item_id not in turn._seen_image_ids):
+                turn._seen_image_ids.add(item_id)
+                try:
+                    saved = item.get("savedPath")
+                    path = Path(saved) if saved else None
+                    if path is None or not path.is_file():
+                        data = base64.b64decode(item["result"], validate=True)
+                        if not data:
+                            raise ValueError("Image generation returned no image")
+                        root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+                        root = root / "generated_images" / "discord"
+                        root.mkdir(parents=True, exist_ok=True)
+                        path = root / (hashlib.sha256(data).hexdigest() + ".png")
+                        path.write_bytes(data)
+                    if turn.on_image:
+                        await turn.on_image(str(path))
+                except Exception:
+                    log.exception("Failed to forward generated image %s", item_id)
             _SKIP_TYPES = ("", "message", "text", "usermessage", "agentmessage", "reasoning")
             if turn and item_id and item_id not in turn._seen_tool_ids and item_type not in _SKIP_TYPES:
                 turn._seen_tool_ids.add(item_id)
@@ -418,7 +442,7 @@ class CodexAppServer:
 
     async def send_turn(self, ctx_key: str, cwd: str, prompt: str,
                         system_prompt: str = "",
-                        on_text=None, on_tool=None,
+                        on_text=None, on_tool=None, on_image=None,
                         timeout: float = 72000) -> dict:
         """Send a user message and wait for the turn to complete.
         Default timeout is 20 hours — Codex can work for a very long time.
@@ -457,6 +481,7 @@ class CodexAppServer:
                 turn = _TurnState()
                 turn.on_text = on_text
                 turn.on_tool = on_tool
+                turn.on_image = on_image
                 self._turns[thread_id] = turn
 
                 # Determine model - required field, use stored or default
