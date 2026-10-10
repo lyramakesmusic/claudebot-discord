@@ -54,3 +54,8 @@ selfbot/
 
 # Nested repos
 jev-bot/
+
+# Midjourney integration: local-only (needs selfbot/browser jank)
+integrations/midjourney.py
+integrations/midjourney_browser_archive/
+plugins/midjourney/

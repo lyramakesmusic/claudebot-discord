@@ -136,9 +136,6 @@ async def _reply_or_send(message, channel, content, **kwargs):
         return await channel.send(content, **kwargs)
 
 
-# Midjourney image generation (see midjourney.py)
-from integrations.midjourney import enqueue_midjourney
-
 # Voice pipeline (see voice.py) — optional, needs websockets + voice_recv
 # Patch voice_recv BEFORE importing voice.py (fixes OpusError: corrupted stream)
 try:

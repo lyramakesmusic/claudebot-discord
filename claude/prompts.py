@@ -80,6 +80,8 @@ def build_system_context(projects: dict, channel_name: str = "claude",
     reminders_block = _format_reminders_for_prompt_fn()
     custom_prompt_path = str(_PROMPTS_DIR / "claude_system.md")
     _custom = _load_custom_prompt("claude_system.md")
+    # optional local-only Midjourney docs (data/prompts/midjourney.md, gitignored)
+    _mj_section = _load_custom_prompt("midjourney.md")
     custom_prompt = f"\n\n== USER-DEFINED ADDITIONS ==\n{_custom}" if _custom else ""
     now__pst = datetime.now(_pst).strftime("%Y-%m-%d %H:%M %Z (%A)")
     server_note = f" in {server_name}" if server_name else ""
@@ -123,9 +125,7 @@ To upload a file to the current Discord channel:
 Max 500 MB. Use this to share images, generated files, exports, etc. with the user.
 The path can be absolute or use ~ for home directory.
 
-== IMAGE GENERATION (two models) ==
-You have two image generators. Pick the right one for the task:
-
+== IMAGE GENERATION ==
 **Gemini (generate_image)** â€" precise, realistic, good with text rendering. Best for:
 comic strips, infographics, diagrams, memes, reference-based edits, anything needing accuracy.
 Fast (~10s). Can use reference images for edits.
@@ -135,44 +135,7 @@ Fast (~10s). Can use reference images for edits.
 Reference images: {{"action": "generate_image", "prompt": "edit this to...", "reference_images": ["/path/to/img.png"]}}
 If the user's prompt is in quotes, send it VERBATIM.
 
-**Midjourney (generate_midjourney)** â€" artistic, stylized, beautiful. Best for:
-art, photography, landscapes, portraits, creative/aesthetic imagery, anything where vibe matters.
-Slower (~1-3 min). Returns up to 4 images (grid). Supports --ar 16:9, --v 7, --no, --style raw, etc.
-```bot_action
-{{"action": "generate_midjourney", "prompt": "your midjourney prompt", "caption": "optional caption"}}
-```
-Default to Midjourney for artistic requests. Default to Gemini for precise/informational ones.
-
-**Midjourney prompt style:**
-You're setting a stage, and letting MJ do what it does best and composite it all.
-Typically you should describe what *is* rather than what *isn't*. You're placing props on a stage —
-nouns, adjectives, vibes — and trusting MJ to composite them into something coherent.
-"Leather jacket, biker gang, rusty" will produce a rusty motorcycle or rusted-out building;
-MJ finds a way to make each word make sense visually.
-lonely can mean something — a million images tagged "lonely" give visual meaning to the word,
-but "3am energy" doesn't — it gives you night. "the space where something should be and isn't"
-also doesn't describe something. but things that *do* describe that are important... a silhouette, a color...
-
-MJ already knows what context things live in — "sushi platter" implies the wooden board, the warm
-lighting, the restaurant. The sref wants to make decisions about lighting, texture, atmosphere; that's
-its whole job. Every context word you specify ("wooden board, warm restaurant lighting, appetizing") is
-a decision you're making instead of letting the sref make it, which means the sref has less room to
-do what it's good at. So: give the subject ("sushi platter, fresh nigiri, glistening fish") and let
-MJ and the sref figure out the scene. You'd only specify context when you want it somewhere unusual —
-sushi on a spaceship, sushi in the rain — because MJ's default context for sushi is already a restaurant.
-
-**Midjourney style references:**
-- `--p h8y6x6z` â€" personal style: impressionist oil, soft pastels (pink/teal/cream), dreamy florals, impasto texture
-- `--p u77i72w` â€" "authentically cottagecore": all-the-colors iridescent saturation, prism light, candid energy, overgrown textures. Content-blind (landfill = wildflowers). When prompt fights it: plants flowers, goes b&w, or invents colored lighting. Best with prompt and style in OPPOSITE directions (bleak prompt + alive style = the tension IS the aesthetic). Key modifiers: 'alt girl' for edgy, 'polaroid'/'film photo' for format, 'cigarette' shifts wardrobe darker. Minimal prompts let style drive. NOT a cottagecore genre filter — use it anywhere, the further OOD the more interesting.
-- `--p th2ckk7` â€" "polaroid girl": candid flash photography of alt girls at dark venues. Describe THE PERSON and THE MOMENT, not the photography — the style IS the camera. Key prompt: 'girls night, alt girl, black hair and bangs, eyeliner, cigarette, best friends, candid shot by friend'. Character details ('eyeliner', 'cigarette') imply the whole scene. 'candid shot by friend' is the magic phrase. MUST use negative prompt: `--no film grain, vintage, analog, blur, golden hour, black and white, washed out, unsaturated` to fight grain entanglement. Home domain: dark venues, alt fashion, dive bars. Weak on: cozy/soft/pastoral (use u77i72w for that). Blends with u77i72w for color/clarity boost. Also works as infinite instagram lookbook: 'girl posing for photo, unique outfit, [single word], sitting --no film grain...' where the single word is a gene that mutates the whole image.
-- `--p m7411308867117645836` â€" "technica": dark-bg data viz, satellite maps, isometric pixel art, scientific diagrams, glowing nodes
-- `--p m7385782731810013220` â€" "celestia": high-contrast B&W/blue ink wash, stormy skies, crashing waves, ghostly figures, manga energy
-- `--p m7371456825037684762` â€" "baroque psychedelia": Pre-Raphaelite oil, lush gardens, golden-hour pastoral, ethereal women, rich greens/golds
-- `--sref 7986796233` â€" ultra-dense maximalist collage, Flemish still-life meets fantasy, peacocks/flowers/gilt, jewel tones, no negative space
-- `--sref 2673701082` â€" epic fantasy landscapes, deep blue/amber/gold, cosmic nebula skies, glowing castles/waterfalls, luminous depth
-- `--sref random` gives a random style. Use multiple: `--sref 1234 5678`
-- To test a style unbiased, use a nonsense prompt like "IMG_0430.heic"
-- See `data/midjourney_srefs.jsonl` for saved sref/description combos
+{_mj_section}
 
 == VOICE CHANNELS ==
 You can join and leave Discord voice channels. When connected, users can talk to you
@@ -299,6 +262,8 @@ def build_thread_context(project_name: str = "", project_cwd: str = "",
     bot_file = str(_bot_file)
     custom_prompt_path = str(_PROMPTS_DIR / "claude_thread.md")
     _custom = _load_custom_prompt("claude_thread.md")
+    # optional local-only Midjourney docs (data/prompts/midjourney_thread.md, gitignored)
+    _mj_section = _load_custom_prompt("midjourney_thread.md")
     custom_prompt = f"\n\n== USER-DEFINED ADDITIONS ==\n{_custom}" if _custom else ""
 
     # Project context header
@@ -322,7 +287,7 @@ To upload a file to the current Discord channel:
 Max 500 MB. Use this to share images, generated files, exports, etc. with the user.
 The path can be absolute or use ~ for home directory.
 
-== IMAGE GENERATION (two models) ==
+== IMAGE GENERATION ==
 **Gemini (generate_image)** â€" precise, realistic, good with text. Best for: comic strips,
 infographics, diagrams, memes, reference-based edits. Fast (~10s).
 ```bot_action
@@ -331,44 +296,7 @@ infographics, diagrams, memes, reference-based edits. Fast (~10s).
 Reference images: {{"action": "generate_image", "prompt": "edit this to...", "reference_images": ["/path/to/img.png"]}}
 If the user's prompt is in quotes, send it VERBATIM.
 
-**Midjourney (generate_midjourney)** â€" artistic, stylized, beautiful. Best for: art, photography,
-landscapes, portraits, creative/aesthetic imagery. Slower (~1-3 min). Returns up to 4 images.
-Supports --ar 16:9, --v 7, --no, --style raw, etc.
-```bot_action
-{{"action": "generate_midjourney", "prompt": "your midjourney prompt", "caption": "optional caption"}}
-```
-Default to Midjourney for artistic requests. Default to Gemini for precise/informational ones.
-
-**Midjourney prompt style:**
-You're setting a stage, and letting MJ do what it does best and composite it all.
-Typically you should describe what *is* rather than what *isn't*. You're placing props on a stage —
-nouns, adjectives, vibes — and trusting MJ to composite them into something coherent.
-"Leather jacket, biker gang, rusty" will produce a rusty motorcycle or rusted-out building;
-MJ finds a way to make each word make sense visually.
-lonely can mean something — a million images tagged "lonely" give visual meaning to the word,
-but "3am energy" doesn't — it gives you night. "the space where something should be and isn't"
-also doesn't describe something. but things that *do* describe that are important... a silhouette, a color...
-
-MJ already knows what context things live in — "sushi platter" implies the wooden board, the warm
-lighting, the restaurant. The sref wants to make decisions about lighting, texture, atmosphere; that's
-its whole job. Every context word you specify ("wooden board, warm restaurant lighting, appetizing") is
-a decision you're making instead of letting the sref make it, which means the sref has less room to
-do what it's good at. So: give the subject ("sushi platter, fresh nigiri, glistening fish") and let
-MJ and the sref figure out the scene. You'd only specify context when you want it somewhere unusual —
-sushi on a spaceship, sushi in the rain — because MJ's default context for sushi is already a restaurant.
-
-**Midjourney style references:**
-- `--p h8y6x6z` â€" personal style: slightly abstract, watercolor-y
-- `--p u77i72w` â€" "authentically cottagecore": iridescent saturation, prism light, candid energy. Best with prompt opposing the style. NOT a cottagecore filter — use anywhere, further OOD = more interesting.
-- `--p th2ckk7` â€" "polaroid girl": candid flash photography, alt girls, dark venues. Describe the person not the photo. MUST use `--no film grain, vintage, analog, blur, golden hour, black and white, washed out, unsaturated`.
-- `--p m7411308867117645836` â€" "technica": science diagrams, engineering textbook cover art
-- `--p m7385782731810013220` â€" "celestia": washed out, dynamic, black/white/blue, sketchy
-- `--p m7371456825037684762` â€" "baroque psychedelia": vivid, watercolor-y, tendrils/flowers/arches
-- `--sref 7986796233` â€" baroque fantasy-garden, maximalist
-- `--sref 2673701082` â€" psychedelic, blue/orange, thin webs
-- `--sref random` gives a random style. Use multiple: `--sref 1234 5678`
-- To test a style unbiased, use a nonsense prompt like "IMG_0430.heic"
-- See `data/midjourney_srefs.jsonl` for saved sref/description combos
+{_mj_section}
 
 == VOICE CHANNELS ==
 Join/leave Discord voice channels for voice conversation:
