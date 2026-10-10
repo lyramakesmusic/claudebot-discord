@@ -89,6 +89,21 @@ def _start_opal(root: Path) -> subprocess.Popen:
 
 
 
+def _start_kimi(root: Path) -> subprocess.Popen | None:
+    # Optional bot: only run if a kimi token is configured (env or .env).
+    token = os.environ.get("KIMI_DISCORD_TOKEN", "")
+    env_file = root / ".env"
+    if not token and env_file.exists():
+        for line in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.strip().startswith("KIMI_DISCORD_TOKEN="):
+                token = line.split("=", 1)[1].strip().strip('"').strip("'")
+    if not token:
+        return None
+    return _start_bot(
+        [_venv_python(root), str(root / "kimi_bot.py")], str(root),
+    )
+
+
 def _start_claire(root: Path) -> subprocess.Popen | None:
     env_file = root / ".env.claire"
     if not env_file.exists():
@@ -155,6 +170,19 @@ def main():
             backoff_delay=BACKOFF_DELAY,
         ),
     }
+
+    kimi_proc = _start_kimi(root)
+    if kimi_proc is not None:
+        bots["kimibot"] = BotProcess(
+            name="kimibot",
+            start_fn=lambda: _start_kimi(root),
+            rapid_window=RAPID_WINDOW,
+            max_rapid_restarts=MAX_RAPID_RESTARTS,
+            restart_delay=RESTART_DELAY,
+            backoff_delay=BACKOFF_DELAY,
+            proc=kimi_proc,
+            start_time=time.time(),
+        )
 
     claire_proc = _start_claire(root)
     if claire_proc is not None:
