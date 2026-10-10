@@ -16,8 +16,6 @@ VoiceManager = None
 _seed_project = None
 _bg_generate_image = None
 _system_stats = None
-call_gpt = None
-call_researcher = None
 split_message = None
 sanitize = None
 log = None
@@ -25,7 +23,6 @@ _BOT_FILE = None
 PROJECT_ROOT = None
 DOCUMENTS_DIR = Path.home() / "Documents"
 CREATE_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-_council_gpt_history = None
 
 
 def configure(
@@ -37,8 +34,6 @@ def configure(
     seed_project_cb,
     bg_generate_image_cb,
     system_stats_fn,
-    call_gpt_fn,
-    call_researcher_fn,
     split_message_fn,
     sanitize_fn,
     logger,
@@ -46,11 +41,10 @@ def configure(
     project_root: Path,
     documents_dir: Path,
     create_flags: int,
-    council_gpt_history: dict,
 ):
     global state, client, voice_manager, VoiceManager, _seed_project, _bg_generate_image, _system_stats
-    global call_gpt, call_researcher, split_message, sanitize, log, _BOT_FILE
-    global PROJECT_ROOT, DOCUMENTS_DIR, CREATE_FLAGS, _council_gpt_history
+    global split_message, sanitize, log, _BOT_FILE
+    global PROJECT_ROOT, DOCUMENTS_DIR, CREATE_FLAGS
     state = state_obj
     client = client_obj
     voice_manager = voice_manager_obj
@@ -58,8 +52,6 @@ def configure(
     _seed_project = seed_project_cb
     _bg_generate_image = bg_generate_image_cb
     _system_stats = system_stats_fn
-    call_gpt = call_gpt_fn
-    call_researcher = call_researcher_fn
     split_message = split_message_fn
     sanitize = sanitize_fn
     log = logger
@@ -67,7 +59,6 @@ def configure(
     PROJECT_ROOT = project_root
     DOCUMENTS_DIR = documents_dir
     CREATE_FLAGS = create_flags
-    _council_gpt_history = council_gpt_history
 
 async def execute_bot_actions(
     actions: list[dict],
@@ -264,70 +255,6 @@ async def execute_bot_actions(
                 continue
             result_msg = await voice_manager.switch_voice(voice_name)
             results.append(result_msg)
-
-        elif action == "call_gpt":
-            gpt_msg = act.get("message", "").strip()
-            if not gpt_msg:
-                results.append("call_gpt: no message given")
-                continue
-            # post Opus's message to the thread
-            for chunk in split_message(f"**[to GPT]** {gpt_msg}"):
-                try:
-                    await channel.send(chunk)
-                except Exception:
-                    pass
-            # build/extend conversation history for this thread
-            ch_id = channel.id
-            if ch_id not in _council_gpt_history:
-                # evict oldest channels if at capacity
-                if len(_council_gpt_history) >= 50:
-                    oldest_key = next(iter(_council_gpt_history))
-                    del _council_gpt_history[oldest_key]
-                _council_gpt_history[ch_id] = []
-            _council_gpt_history[ch_id].append({"role": "user", "content": gpt_msg})
-            # cap messages per channel (keep most recent)
-            if len(_council_gpt_history[ch_id]) > 20:
-                _council_gpt_history[ch_id] = _council_gpt_history[ch_id][-20:]
-            # call GPT
-            gpt_result = await call_gpt(_council_gpt_history[ch_id])
-            if gpt_result["error"]:
-                await channel.send(f"**[GPT error]** {gpt_result['error'][:500]}")
-                results.append(f"GPT error: {gpt_result['error'][:200]}")
-            else:
-                gpt_content = gpt_result["content"]
-                _council_gpt_history[ch_id].append({"role": "assistant", "content": gpt_content})
-                cost_note = f"\n-# Cost: ${gpt_result['cost']:.4f}" if gpt_result["cost"] else ""
-                for chunk in split_message(f"**[GPT to Opus]** {gpt_content}{cost_note}"):
-                    try:
-                        await channel.send(chunk)
-                    except Exception:
-                        pass
-                results.append(f"[GPT responded — {len(gpt_content)} chars]")
-                council_feedback.append(f"[GPT to Opus] {gpt_content}")
-
-        elif action == "call_researcher":
-            query = act.get("query", "").strip()
-            if not query:
-                results.append("call_researcher: no query given")
-                continue
-            context = act.get("context", "").strip()
-            # post the research request
-            await channel.send(f"**[Research query]** {query[:500]}")
-            # call Gemini
-            research_result = await call_researcher(query, context)
-            if research_result["error"]:
-                await channel.send(f"**[Research error]** {research_result['error'][:500]}")
-                results.append(f"Research error: {research_result['error'][:200]}")
-            else:
-                research_content = research_result["content"]
-                cost_note = f"\n-# Cost: ${research_result['cost']:.4f}" if research_result["cost"] else ""
-                for chunk in split_message(f"**[Gemini — deep research]** {research_content}{cost_note}"):
-                    try:
-                        await channel.send(chunk)
-                    except Exception:
-                        pass
-                results.append(f"[Research complete — {len(research_content)} chars]")
-                council_feedback.append(f"[Gemini — deep research] {research_content}")
 
         else:
             log.warning(f"Unknown bot_action: {action}")

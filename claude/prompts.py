@@ -162,7 +162,7 @@ MJ and the sref figure out the scene. You'd only specify context when you want i
 sushi on a spaceship, sushi in the rain — because MJ's default context for sushi is already a restaurant.
 
 **Midjourney style references:**
-- `--p h8y6x6z` â€" Lyra's personal style: impressionist oil, soft pastels (pink/teal/cream), dreamy florals, impasto texture
+- `--p h8y6x6z` â€" personal style: impressionist oil, soft pastels (pink/teal/cream), dreamy florals, impasto texture
 - `--p u77i72w` â€" "authentically cottagecore": all-the-colors iridescent saturation, prism light, candid energy, overgrown textures. Content-blind (landfill = wildflowers). When prompt fights it: plants flowers, goes b&w, or invents colored lighting. Best with prompt and style in OPPOSITE directions (bleak prompt + alive style = the tension IS the aesthetic). Key modifiers: 'alt girl' for edgy, 'polaroid'/'film photo' for format, 'cigarette' shifts wardrobe darker. Minimal prompts let style drive. NOT a cottagecore genre filter — use it anywhere, the further OOD the more interesting.
 - `--p th2ckk7` â€" "polaroid girl": candid flash photography of alt girls at dark venues. Describe THE PERSON and THE MOMENT, not the photography — the style IS the camera. Key prompt: 'girls night, alt girl, black hair and bangs, eyeliner, cigarette, best friends, candid shot by friend'. Character details ('eyeliner', 'cigarette') imply the whole scene. 'candid shot by friend' is the magic phrase. MUST use negative prompt: `--no film grain, vintage, analog, blur, golden hour, black and white, washed out, unsaturated` to fight grain entanglement. Home domain: dark venues, alt fashion, dive bars. Weak on: cozy/soft/pastoral (use u77i72w for that). Blends with u77i72w for color/clarity boost. Also works as infinite instagram lookbook: 'girl posing for photo, unique outfit, [single word], sitting --no film grain...' where the single word is a gene that mutates the whole image.
 - `--p m7411308867117645836` â€" "technica": dark-bg data viz, satellite maps, isometric pixel art, scientific diagrams, glowing nodes
@@ -358,7 +358,7 @@ MJ and the sref figure out the scene. You'd only specify context when you want i
 sushi on a spaceship, sushi in the rain — because MJ's default context for sushi is already a restaurant.
 
 **Midjourney style references:**
-- `--p h8y6x6z` â€" Lyra's personal style: slightly abstract, watercolor-y
+- `--p h8y6x6z` â€" personal style: slightly abstract, watercolor-y
 - `--p u77i72w` â€" "authentically cottagecore": iridescent saturation, prism light, candid energy. Best with prompt opposing the style. NOT a cottagecore filter — use anywhere, further OOD = more interesting.
 - `--p th2ckk7` â€" "polaroid girl": candid flash photography, alt girls, dark venues. Describe the person not the photo. MUST use `--no film grain, vintage, analog, blur, golden hour, black and white, washed out, unsaturated`.
 - `--p m7411308867117645836` â€" "technica": science diagrams, engineering textbook cover art

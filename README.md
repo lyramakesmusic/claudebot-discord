@@ -1,6 +1,6 @@
 # claudebot
 
-Discord bot system that bridges Discord to [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI. Runs 24/7 on a MacBook (Windows also supported), managing persistent AI sessions across multiple servers with image generation, music generation, voice conversations, and multi-model research.
+Discord bot system that bridges Discord to [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI. Runs 24/7 on a MacBook (Windows also supported), managing persistent AI sessions across multiple servers with image generation, music generation, and voice conversations.
 
 > Built and maintained collaboratively by Claude and [Lyra](https://github.com/lyramakesmusic).
 
@@ -37,7 +37,6 @@ claudebot/
 │   ├── image_gen.py                 # Gemini image generation (OpenRouter)
 │   ├── memories.py                  # Persistent memory notebook
 │   ├── reminders.py                 # Scheduled reminder system
-│   ├── research.py                  # /research command (council thread bootstrap)
 │   ├── attachments.py               # Discord attachment download + PDF extraction
 │   └── contexts.py                  # Context/session switching
 ├── codex/                           # Codex bot (similar structure, uses codex CLI)
@@ -56,7 +55,6 @@ claudebot/
 │   └── health.py                    # Heartbeat writer
 ├── integrations/                    # External service integrations
 │   ├── midjourney.py                # Midjourney image generation
-│   ├── council.py                   # GPT-5 critic + Gemini researcher (OpenRouter)
 │   └── voice/                       # Real-time voice conversations
 │       ├── manager.py               # VoiceManager (Discord VC lifecycle)
 │       ├── stt.py                   # Speech-to-text (faster-whisper)
@@ -67,12 +65,10 @@ claudebot/
 │   ├── upload/                      # File upload to Discord
 │   ├── image_gen/                   # Gemini image generation actions
 │   ├── midjourney/                  # Midjourney actions
-│   ├── council/                     # GPT/Gemini council actions
 │   ├── voice/                       # Voice channel actions
 │   ├── project_mgmt/               # Project creation, reload, restart
 │   ├── memories/                    # Memory persistence plugin
 │   ├── reminders/                   # Reminder scheduling plugin
-│   ├── research/                    # /research command plugin
 │   └── system_stats/               # CPU/RAM/GPU monitoring
 ├── data/
 │   ├── state.json                   # Runtime state (sessions, projects, guilds)
@@ -177,7 +173,6 @@ Discord message arrives
         │
         ├─ Extract ```bot_action``` JSON blocks from response
         ├─ Dispatch actions to plugins (generate_image, create_project, etc.)
-        ├─ If actions produce council feedback: send back to Claude, loop
         │
         ├─ Send usage footer: "ctx 12% | 119,616 tokens (98% cached) | 25s"
         │     (suppressed for untrusted guilds)
@@ -332,7 +327,7 @@ CODEX_MODEL=                                   # blank = follow ~/.codex/config.
 # Owner
 OWNER_ID=your_discord_user_id                  # numeric Discord user ID
 
-# OpenRouter — for image gen, council, voice LLM
+# OpenRouter — for image gen, voice LLM
 OPENROUTER_API_KEY=sk-or-...
 
 # ElevenLabs — for voice TTS (optional)
@@ -444,15 +439,6 @@ Real-time voice in Discord voice channels:
 - **VAD:** Silero VAD + smart turn detection (ONNX model)
 - **LLM:** Claude via OpenRouter (streaming)
 - **TTS:** ElevenLabs WebSocket streaming (multiple voices: cowboy, clown, asmr)
-
-### Council (Multi-Model Research)
-
-Three-model architecture for research threads:
-- **Claude** (orchestrator): drives the investigation, synthesizes findings
-- **GPT-5** (critic): pressure-tests ideas, finds flaws
-- **Gemini 3 Flash** (researcher): deep web search, gathers evidence
-
-Triggered via `/research topic` command or `call_gpt`/`call_researcher` bot actions.
 
 ## Critical Warning
 

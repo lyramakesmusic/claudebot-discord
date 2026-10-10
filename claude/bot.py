@@ -52,8 +52,6 @@ from claude.reminders import process_reminder_actions as process_reminder_action
 from claude.scratch import SCRATCH_ACTION_RE
 from claude.scratch import configure as configure_scratch_module
 from claude.scratch import process_scratch_actions as process_scratch_actions_module
-from claude.research import configure as configure_research_module
-from claude.research import try_handle_research_command as try_handle_research_command_module
 from claude.system_stats import configure as configure_system_stats_module
 from claude.system_stats import system_stats as system_stats_module
 from shared.bot_actions import extract_bot_actions as extract_bot_actions_module
@@ -141,10 +139,6 @@ async def _reply_or_send(message, channel, content, **kwargs):
 # Midjourney image generation (see midjourney.py)
 from integrations.midjourney import enqueue_midjourney
 
-# Council (multi-model research) — see council.py
-from integrations.council import call_gpt, call_researcher
-from integrations.council_prompt import build_opus_council_prompt
-
 # Voice pipeline (see voice.py) — optional, needs websockets + voice_recv
 # Patch voice_recv BEFORE importing voice.py (fixes OpusError: corrupted stream)
 try:
@@ -217,17 +211,6 @@ configure_contexts_module(
     bridge_obj=bridge,
     default_cwd=DEFAULT_CWD,
 )
-configure_research_module(
-    state_obj=state,
-    bridge_obj=bridge,
-    build_opus_council_prompt_fn=build_opus_council_prompt,
-    extract_bot_actions_fn=extract_bot_actions_module,
-    execute_bot_actions_fn=execute_bot_actions_module,
-    split_message_fn=split_message,
-    sanitize_fn=sanitize,
-    logger=log,
-    typing_interval=TYPING_INTERVAL,
-)
 _processed_msgs: set[int] = set()  # message IDs we've already handled
 _boot_time = datetime.utcnow()  # ignore messages from before we started
 
@@ -244,12 +227,6 @@ _TRUSTED_GUILDS = {
     1061615370068303902,   # lyra's server (primary)
     1468279688630636688,   # hehe
 }
-
-# Council: GPT conversation history per thread (channel_id -> list of messages)
-# Capped to prevent unbounded memory growth.
-_council_gpt_history: dict[int, list[dict]] = {}
-_COUNCIL_MAX_MSGS_PER_CHANNEL = 20  # keep last N messages per channel
-_COUNCIL_MAX_CHANNELS = 50          # evict oldest channels beyond this
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -271,8 +248,6 @@ def _configure_actions():
         seed_project_cb=seed_project_module,
         bg_generate_image_cb=bg_generate_image_module,
         system_stats_fn=system_stats_module,
-        call_gpt_fn=call_gpt,
-        call_researcher_fn=call_researcher,
         split_message_fn=split_message,
         sanitize_fn=sanitize,
         logger=log,
@@ -280,7 +255,6 @@ def _configure_actions():
         project_root=PROJECT_ROOT,
         documents_dir=DOCUMENTS_DIR,
         create_flags=CREATE_FLAGS,
-        council_gpt_history=_council_gpt_history,
     )
 
 
@@ -342,9 +316,6 @@ async def _legacy_plugin_event(event_name: str, *args, **kwargs):
 
 
 async def _legacy_plugin_command(cmd: str, message, channel, **kwargs) -> bool:
-    cmd_lower = (cmd or "").strip().lower()
-    if cmd_lower.startswith("/research"):
-        return await try_handle_research_command_module(message, cmd_lower, channel)
     return False
 
 
@@ -356,11 +327,9 @@ async def _load_plugins():
         "upload",
         "voice",
         "image_gen",
-        "council",
         "project_mgmt",
         "memories",
         "reminders",
-        "research",
         "system_stats",
         "midjourney",
     ]
@@ -1229,10 +1198,8 @@ async def on_message(message: discord.Message):
             await message.add_reaction("\u23f9")  # stop button emoji
             return
 
-    # ── /research command — start a council research thread ──
+    # ── plugin slash-style commands ──
     if _plugin_mgr is not None and await _plugin_mgr.try_command(raw_text, message, channel):
-        return
-    if await try_handle_research_command_module(message, raw_text, channel):
         return
 
     # ── Extract prompt ───────────────────────────────────────
@@ -1579,7 +1546,7 @@ async def on_message(message: discord.Message):
     # ── Safety note for non-owner users in untrusted guilds ──
     if guild_id not in _TRUSTED_GUILDS and message.author.id != OWNER_ID:
         user_msg += (
-            "\n\n[Note: This is not Lyra. You are running on Lyra's personal desktop. "
+            "\n\n[Note: This is not the bot's owner. You are running on the owner's personal machine. "
             "Be cautious — avoid accessing sensitive files, running destructive commands, "
             "SSH, or anything that could affect her system. Stick to safe, read-only, "
             "sandboxed operations unless you're confident it's harmless.]"
@@ -1597,18 +1564,12 @@ async def on_message(message: discord.Message):
             guild_id=guild_id,
         )
     else:
-        # council threads get the council-specific Opus prompt
-        tp_data = state.find_project_by_thread(channel_id)
-        is_council = tp_data[1].get("council", False) if tp_data else False
-        if is_council:
-            sys_prompt = build_opus_council_prompt()
-        else:
-            sys_prompt = build_thread_context_module(
-                project_name=label or "",
-                project_cwd=cwd,
-                channel_name=getattr(channel, "name", ""),
-                server_name=guild.name if guild else "",
-            )
+        sys_prompt = build_thread_context_module(
+            project_name=label or "",
+            project_cwd=cwd,
+            channel_name=getattr(channel, "name", ""),
+            server_name=guild.name if guild else "",
+        )
 
     # ── Get or create persistent process ─────────────────────
     if _plugin_mgr is not None:
