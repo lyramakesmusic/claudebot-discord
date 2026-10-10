@@ -176,6 +176,9 @@ async def execute_bot_actions(
                 continue
             ref_images = act.get("reference_images", [])
             caption = act.get("caption", "").strip()
+            if _bg_generate_image is None:
+                results.append("(image generation not installed)")
+                continue
             log.info(f"Generating image (async): {prompt[:80]}")
             asyncio.create_task(_bg_generate_image(channel, prompt, ref_images or None, caption, message.author.id))
 

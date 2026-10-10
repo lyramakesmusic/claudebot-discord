@@ -80,8 +80,8 @@ def build_system_context(projects: dict, channel_name: str = "claude",
     reminders_block = _format_reminders_for_prompt_fn()
     custom_prompt_path = str(_PROMPTS_DIR / "claude_system.md")
     _custom = _load_custom_prompt("claude_system.md")
-    # optional local-only Midjourney docs (data/prompts/midjourney.md, gitignored)
-    _mj_section = _load_custom_prompt("midjourney.md")
+    # optional local-only toys docs: image gen etc (data/prompts/toys.md, gitignored)
+    _toys_section = _load_custom_prompt("toys.md")
     custom_prompt = f"\n\n== USER-DEFINED ADDITIONS ==\n{_custom}" if _custom else ""
     now__pst = datetime.now(_pst).strftime("%Y-%m-%d %H:%M %Z (%A)")
     server_note = f" in {server_name}" if server_name else ""
@@ -125,17 +125,7 @@ To upload a file to the current Discord channel:
 Max 500 MB. Use this to share images, generated files, exports, etc. with the user.
 The path can be absolute or use ~ for home directory.
 
-== IMAGE GENERATION ==
-**Gemini (generate_image)** â€" precise, realistic, good with text rendering. Best for:
-comic strips, infographics, diagrams, memes, reference-based edits, anything needing accuracy.
-Fast (~10s). Can use reference images for edits.
-```bot_action
-{{"action": "generate_image", "prompt": "descriptive prompt", "caption": "optional caption"}}
-```
-Reference images: {{"action": "generate_image", "prompt": "edit this to...", "reference_images": ["/path/to/img.png"]}}
-If the user's prompt is in quotes, send it VERBATIM.
-
-{_mj_section}
+{_toys_section}
 
 == VOICE CHANNELS ==
 You can join and leave Discord voice channels. When connected, users can talk to you
@@ -262,8 +252,8 @@ def build_thread_context(project_name: str = "", project_cwd: str = "",
     bot_file = str(_bot_file)
     custom_prompt_path = str(_PROMPTS_DIR / "claude_thread.md")
     _custom = _load_custom_prompt("claude_thread.md")
-    # optional local-only Midjourney docs (data/prompts/midjourney_thread.md, gitignored)
-    _mj_section = _load_custom_prompt("midjourney_thread.md")
+    # optional local-only toys docs: image gen etc (data/prompts/toys_thread.md, gitignored)
+    _toys_section = _load_custom_prompt("toys_thread.md")
     custom_prompt = f"\n\n== USER-DEFINED ADDITIONS ==\n{_custom}" if _custom else ""
 
     # Project context header
@@ -287,16 +277,7 @@ To upload a file to the current Discord channel:
 Max 500 MB. Use this to share images, generated files, exports, etc. with the user.
 The path can be absolute or use ~ for home directory.
 
-== IMAGE GENERATION ==
-**Gemini (generate_image)** â€" precise, realistic, good with text. Best for: comic strips,
-infographics, diagrams, memes, reference-based edits. Fast (~10s).
-```bot_action
-{{"action": "generate_image", "prompt": "descriptive prompt", "caption": "optional caption"}}
-```
-Reference images: {{"action": "generate_image", "prompt": "edit this to...", "reference_images": ["/path/to/img.png"]}}
-If the user's prompt is in quotes, send it VERBATIM.
-
-{_mj_section}
+{_toys_section}
 
 == VOICE CHANNELS ==
 Join/leave Discord voice channels for voice conversation:

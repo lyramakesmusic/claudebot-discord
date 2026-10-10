@@ -59,3 +59,7 @@ jev-bot/
 integrations/midjourney.py
 integrations/midjourney_browser_archive/
 plugins/midjourney/
+
+# Toys: local-only, API-dependent integrations (will rot as APIs/models change)
+claude/image_gen.py
+plugins/image_gen/

@@ -33,8 +33,12 @@ from claude.contexts import try_handle_context_command as try_handle_context_com
 from claude.bridge import ClaudeBridge as BridgeClaudeBridge
 from claude.bridge import configure as configure_bridge_module
 from claude.bridge import rewind_transcript as rewind_transcript_module
-from claude.image_gen import bg_generate_image as bg_generate_image_module
-from claude.image_gen import configure as configure_image_gen_module
+try:  # optional local-only toy (gitignored): Gemini image gen
+    from claude.image_gen import bg_generate_image as bg_generate_image_module
+    from claude.image_gen import configure as configure_image_gen_module
+except ImportError:
+    bg_generate_image_module = None
+    configure_image_gen_module = None
 from claude.actions import configure as configure_actions_module
 from claude.actions import execute_bot_actions as execute_bot_actions_module
 from claude.memories import MEMORY_ACTION_RE
@@ -184,13 +188,14 @@ state = BotState(STATE_FILE)
 bridge = BridgeClaudeBridge()
 configure_bridge_module(log, CLAUDE_CMD, CLAUDE_MODEL, CREATE_FLAGS)
 configure_system_stats_module(CREATE_FLAGS)
-configure_image_gen_module(
-    openrouter_api_key=OPENROUTER_API_KEY,
-    image_model=IMAGE_MODEL,
-    generated_images_dir=GENERATED_IMAGES_DIR,
-    owner_id=OWNER_ID,
-    logger=log,
-)
+if configure_image_gen_module is not None:
+    configure_image_gen_module(
+        openrouter_api_key=OPENROUTER_API_KEY,
+        image_model=IMAGE_MODEL,
+        generated_images_dir=GENERATED_IMAGES_DIR,
+        owner_id=OWNER_ID,
+        logger=log,
+    )
 configure_project_seed_module(
     state_obj=state,
     bridge_obj=bridge,
