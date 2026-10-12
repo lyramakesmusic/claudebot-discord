@@ -1598,13 +1598,34 @@ async def on_message(message: discord.Message):
                 except Exception:
                     pass
             if text.strip():
-                cleaned, _ = extract_bot_actions_module(text)
+                # same pipeline as a normal turn: memory/reminder blocks out first, then actions
+                text = await _process_plugin_text(
+                    text,
+                    channel_name=getattr(channel, "name", "DM"),
+                    server_name=getattr(getattr(channel, "guild", None), "name", "DM"),
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                    requester_id=message.author.id,
+                )
+                cleaned, actions = extract_bot_actions_module(text)
+                cleaned = _strip_text_for_display(cleaned)
                 if cleaned.strip():
                     for chunk in split_message(sanitize(cleaned.strip())):
                         try:
                             await channel.send(chunk)
                         except Exception:
                             pass
+                # reload is skipped here (no turn to hand off to); everything else dispatches
+                actions = [a for a in actions if a.get("action") != "reload"]
+                if actions:
+                    results, _, files, _ = await _dispatch_actions(
+                        actions, message, channel, guild_id, caller_ctx_key=ctx_key
+                    )
+                    if results or files:
+                        chunks = split_message(sanitize("\n".join(results))) if results else [None]
+                        await channel.send(chunks[0], files=files or None)
+                        for chunk in chunks[1:]:
+                            await channel.send(chunk)
         pp.on_unsolicited = _on_unsolicited
 
     # ── If Claude is busy, inject + interrupt so it reads immediately ──
