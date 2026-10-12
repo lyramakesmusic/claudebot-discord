@@ -255,11 +255,10 @@ Each Discord server gets:
 
 ### Trusted vs Untrusted Guilds
 
-```python
-_TRUSTED_GUILDS = {
-    1061615370068303902,   # lyra's server (primary)
-    1468279688630636688,   # hehe
-}
+Set `TRUSTED_GUILD_IDS` in `.env` (comma-separated guild IDs). Empty = no trusted guilds.
+
+```
+TRUSTED_GUILD_IDS=123456789012345678,234567890123456789
 ```
 
 In untrusted guilds, non-owner users get a safety note appended to their messages warning Claude about running on a personal desktop. The ctx/token footer is also suppressed.
@@ -273,23 +272,23 @@ In untrusted guilds, non-owner users get a safety note appended to their message
   "sessions": {
     "proj:claudebot": {
       "session_id": "b0abe0eb-...",
-      "cwd": "C:\\Users\\Lyra\\Documents\\claudebot",
+      "cwd": "C:\\Users\\you\\Documents\\claudebot",
       "project": "claudebot",
       "updated": "2026-04-28T..."
     }
   },
   "projects": {
     "claudebot": {
-      "folder": "C:\\Users\\Lyra\\Documents\\claudebot",
-      "thread_id": 1466783472017342464,
-      "guild_id": 1061615370068303902
+      "folder": "C:\\Users\\you\\Documents\\claudebot",
+      "thread_id": 345678901234567890,
+      "guild_id": 123456789012345678
     }
   },
   "guilds": {
-    "1061615370068303902": {
-      "home_channel_id": 1466772067968880772,
-      "slug": "lyra-s-server",
-      "docs_dir": "C:\\Users\\Lyra\\Documents"
+    "123456789012345678": {
+      "home_channel_id": 456789012345678901,
+      "slug": "my-server",
+      "docs_dir": "C:\\Users\\you\\Documents"
     }
   }
 }
@@ -326,6 +325,7 @@ CODEX_MODEL=                                   # blank = follow ~/.codex/config.
 
 # Owner
 OWNER_ID=your_discord_user_id                  # numeric Discord user ID
+TRUSTED_GUILD_IDS=                             # comma-separated guild IDs where the bot runs with full trust
 
 # OpenRouter — for image gen, voice LLM
 OPENROUTER_API_KEY=sk-or-...

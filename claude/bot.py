@@ -90,7 +90,7 @@ configure_scratch_module(scratch_dir=STATE_FILE.parent)
 DEFAULT_CWD = str(DOCUMENTS_DIR)
 TYPING_INTERVAL = 8       # seconds between typing indicator refreshes
 
-HOME_CHANNEL_ID = int(os.getenv("HOME_CHANNEL_ID", "1466772067968880772"))
+HOME_CHANNEL_ID = int(os.getenv("HOME_CHANNEL_ID", "0"))
 PRIMARY_GUILD_ID: int = 0  # auto-detected from HOME_CHANNEL_ID in on_ready
 CODEX_BOT_USER_ID = os.getenv("CODEX_BOT_USER_ID", "1473339153839034408")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
@@ -225,9 +225,9 @@ _ctx_processing: set[str] = set()           # ctx_keys currently being handled
 _ctx_pending: dict[str, list[str]] = {}     # ctx_key -> queued user_msgs to send next turn
 
 # Guilds where the bot runs with full trust (no safety notes, full metadata)
+# Configure via .env: TRUSTED_GUILD_IDS=123,456 (comma-separated). Empty = no trusted guilds.
 _TRUSTED_GUILDS = {
-    1061615370068303902,   # lyra's server (primary)
-    1468279688630636688,   # hehe
+    int(g) for g in os.getenv("TRUSTED_GUILD_IDS", "").replace(" ", "").split(",") if g.isdigit()
 }
 
 intents = discord.Intents.default()
